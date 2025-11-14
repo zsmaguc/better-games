@@ -356,13 +356,43 @@ function WordWise() {
     const guess = guesses[rowIndex]
     if (!guess) return ''
 
+    // Count how many times this letter appears in the target word
+    const targetLetterCount = targetWord.split('').filter(l => l === letter).length
+
+    // If this position is an exact match, it's correct (green)
     if (targetWord[position] === letter) {
       return 'correct'
-    } else if (targetWord.includes(letter)) {
-      return 'present'
-    } else {
-      return 'absent'
     }
+
+    // For non-exact matches, check if there are available instances of this letter
+    // Count how many of this letter are already "used" (either correct or present before this position)
+    let usedCount = 0
+
+    // Count exact matches (correct/green) for this letter across the whole guess
+    for (let i = 0; i < guess.length; i++) {
+      if (guess[i] === letter && targetWord[i] === letter) {
+        usedCount++
+      }
+    }
+
+    // Count present matches (yellow) that come before this position
+    for (let i = 0; i < position; i++) {
+      if (guess[i] === letter && targetWord[i] !== letter) {
+        // This position has the same letter but not exact match
+        // Check if it would be marked as present (yellow)
+        if (usedCount < targetLetterCount) {
+          usedCount++
+        }
+      }
+    }
+
+    // If the letter exists in target and we haven't used all instances, mark as present
+    if (targetWord.includes(letter) && usedCount < targetLetterCount) {
+      return 'present'
+    }
+
+    // Otherwise, mark as absent (gray)
+    return 'absent'
   }
 
   // Calculate remaining possible words based on revealed information
