@@ -116,6 +116,29 @@ body {
   font-size: 0.9rem;
 }
 
+.back-button {
+  position: fixed;
+  top: 1.5rem;
+  left: 1.5rem;
+  background: var(--card-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 0.75rem 1.5rem;
+  border-radius: 8px;
+  font-size: 0.95rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  box-shadow: 0 1px 3px var(--shadow);
+  z-index: 100;
+}
+
+.back-button:hover {
+  background: var(--bg);
+  transform: translateX(-2px);
+  box-shadow: 0 4px 12px var(--shadow);
+}
+
 @media (max-width: 640px) {
   .header h1 {
     font-size: 2rem;
