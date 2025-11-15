@@ -15,13 +15,7 @@ const API_KEY_KEY = 'wordwise-api-key'  // Anthropic API key
 const SHOW_REASONING_KEY = 'wordwise-show-reasoning'  // Show AI reasoning toggle
 const MAX_HISTORY_SIZE = 20
 
-// Cloudflare Worker URL - IMPORTANT: Update this after first deployment!
-// 1. Push changes to GitHub (worker deploys automatically via GitHub Actions)
-// 2. Check GitHub Actions tab for deployment status
-// 3. Get your Worker URL from: Cloudflare Dashboard → Workers & Pages → wordwise-proxy
-// 4. Update this constant with your worker URL
-// 5. If not set, will attempt direct API calls (will fail due to CORS in most browsers)
-const CLOUDFLARE_WORKER_URL = null  // Example: 'https://wordwise-proxy.YOUR_ACCOUNT.workers.dev'
+const CLOUDFLARE_WORKER_URL = 'https://wordwise-proxy.zsmaguc.workers.dev'
 
 const KEYBOARD_ROWS = [
   ['Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P'],
@@ -288,7 +282,7 @@ const callClaudeAPI = async (prompt, apiKey) => {
       method: 'POST',
       headers,
       body: JSON.stringify({
-        model: 'claude-haiku-3-5-20241022',
+        model: 'claude-haiku-4-5',
         max_tokens: 50,
         messages: [{
           role: 'user',
