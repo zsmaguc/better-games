@@ -7,7 +7,21 @@ const WORD_LENGTH = 5
 const MAX_ATTEMPTS = 6
 const STATS_KEY = 'wordwise-stats'
 const GAME_STATE_KEY = 'wordwise-game-state'
-const WORD_HISTORY_KEY = 'wordwise-word-history'
+const HISTORY_KEY = 'wordwise-history'  // Game history (last 20 games)
+const USED_WORDS_KEY = 'wordwise-used'  // All used words
+const AI_ENABLED_KEY = 'wordwise-ai-enabled'  // AI toggle preference
+const PENDING_UNDERSTANDING_KEY = 'wordwise-pending-understanding'  // Pending understanding rating
+const API_KEY_KEY = 'wordwise-api-key'  // Anthropic API key
+const SHOW_REASONING_KEY = 'wordwise-show-reasoning'  // Show AI reasoning toggle
+const MAX_HISTORY_SIZE = 20
+
+// Cloudflare Worker URL - IMPORTANT: Update this after first deployment!
+// 1. Push changes to GitHub (worker deploys automatically via GitHub Actions)
+// 2. Check GitHub Actions tab for deployment status
+// 3. Get your Worker URL from: Cloudflare Dashboard → Workers & Pages → wordwise-proxy
+// 4. Update this constant with your worker URL
+// 5. If not set, will attempt direct API calls (will fail due to CORS in most browsers)
+const CLOUDFLARE_WORKER_URL = null  // Example: 'https://wordwise-proxy.YOUR_ACCOUNT.workers.dev'
 
 const KEYBOARD_ROWS = [
   ['Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P'],
@@ -26,7 +40,9 @@ const getInitialStats = () => ({
   wins: 0,
   currentStreak: 0,
   maxStreak: 0,
-  guessDistribution: [0, 0, 0, 0, 0, 0] // Indices 0-5 represent guesses 1-6
+  guessDistribution: [0, 0, 0, 0, 0, 0], // Indices 0-5 represent guesses 1-6
+  aiWords: 0,      // Count of AI-selected words
+  listWords: 0     // Count of random list words
 })
 
 const loadStats = () => {
@@ -55,40 +71,166 @@ const resetStats = () => {
   return initial
 }
 
-// Word history helper functions
-const loadWordHistory = () => {
+// Game history helper functions (last 20 games with details)
+const loadGameHistory = () => {
   try {
-    const stored = localStorage.getItem(WORD_HISTORY_KEY)
+    const stored = localStorage.getItem(HISTORY_KEY)
     if (stored) {
       return JSON.parse(stored)
     }
   } catch (error) {
-    console.error('Error loading word history:', error)
+    console.error('Error loading game history:', error)
   }
   return []
 }
 
-const saveWordHistory = (history) => {
+const saveGameHistory = (history) => {
   try {
-    localStorage.setItem(WORD_HISTORY_KEY, JSON.stringify(history))
+    // Keep only last 20 games
+    const trimmed = history.slice(-MAX_HISTORY_SIZE)
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(trimmed))
   } catch (error) {
-    console.error('Error saving word history:', error)
+    console.error('Error saving game history:', error)
   }
 }
 
-const addWordToHistory = (word) => {
-  const history = loadWordHistory()
-  if (!history.includes(word)) {
-    history.push(word)
-    saveWordHistory(history)
+const addGameToHistory = (word, result, understanding, source) => {
+  const history = loadGameHistory()
+  const entry = { w: word, r: result, src: source }
+  if (understanding !== null && understanding !== undefined) {
+    entry.u = understanding
+  }
+  history.push(entry)
+  saveGameHistory(history)
+}
+
+// Used words helper functions (all words ever played)
+const loadUsedWords = () => {
+  try {
+    const stored = localStorage.getItem(USED_WORDS_KEY)
+    if (stored) {
+      return new Set(JSON.parse(stored))
+    }
+  } catch (error) {
+    console.error('Error loading used words:', error)
+  }
+  return new Set()
+}
+
+const saveUsedWords = (usedWords) => {
+  try {
+    localStorage.setItem(USED_WORDS_KEY, JSON.stringify(Array.from(usedWords)))
+  } catch (error) {
+    console.error('Error saving used words:', error)
   }
 }
 
-const resetWordHistory = () => {
+const addUsedWord = (word) => {
+  const usedWords = loadUsedWords()
+  usedWords.add(word)
+  saveUsedWords(usedWords)
+}
+
+const clearUsedWords = () => {
   try {
-    localStorage.removeItem(WORD_HISTORY_KEY)
+    localStorage.removeItem(USED_WORDS_KEY)
   } catch (error) {
-    console.error('Error resetting word history:', error)
+    console.error('Error clearing used words:', error)
+  }
+}
+
+// AI preference helper functions
+const loadAIEnabled = () => {
+  try {
+    const stored = localStorage.getItem(AI_ENABLED_KEY)
+    if (stored !== null) {
+      return stored === 'true'
+    }
+  } catch (error) {
+    console.error('Error loading AI preference:', error)
+  }
+  return true  // Default to ON
+}
+
+const saveAIEnabled = (enabled) => {
+  try {
+    localStorage.setItem(AI_ENABLED_KEY, enabled ? 'true' : 'false')
+  } catch (error) {
+    console.error('Error saving AI preference:', error)
+  }
+}
+
+// Pending understanding helper functions
+const loadPendingUnderstanding = () => {
+  try {
+    const stored = localStorage.getItem(PENDING_UNDERSTANDING_KEY)
+    if (stored !== null) {
+      return parseInt(stored)
+    }
+  } catch (error) {
+    console.error('Error loading pending understanding:', error)
+  }
+  return null
+}
+
+const savePendingUnderstanding = (rating) => {
+  try {
+    if (rating !== null && rating !== undefined) {
+      localStorage.setItem(PENDING_UNDERSTANDING_KEY, rating.toString())
+    } else {
+      localStorage.removeItem(PENDING_UNDERSTANDING_KEY)
+    }
+  } catch (error) {
+    console.error('Error saving pending understanding:', error)
+  }
+}
+
+// API key helper functions
+const loadAPIKey = () => {
+  try {
+    return localStorage.getItem(API_KEY_KEY) || null
+  } catch (error) {
+    console.error('Error loading API key:', error)
+    return null
+  }
+}
+
+const saveAPIKey = (key) => {
+  try {
+    if (key) {
+      localStorage.setItem(API_KEY_KEY, key)
+    } else {
+      localStorage.removeItem(API_KEY_KEY)
+    }
+  } catch (error) {
+    console.error('Error saving API key:', error)
+  }
+}
+
+const maskAPIKey = (key) => {
+  if (!key || key.length < 4) return '••••••••••••'
+  const lastFour = key.slice(-4)
+  return '••••••••••••' + lastFour
+}
+
+// Show reasoning helper functions
+const loadShowReasoning = () => {
+  try {
+    const stored = localStorage.getItem(SHOW_REASONING_KEY)
+    if (stored !== null) {
+      return stored === 'true'
+    }
+  } catch (error) {
+    console.error('Error loading show reasoning:', error)
+  }
+  return false  // Default to OFF
+}
+
+const saveShowReasoning = (enabled) => {
+  try {
+    localStorage.setItem(SHOW_REASONING_KEY, enabled ? 'true' : 'false')
+  } catch (error) {
+    console.error('Error saving show reasoning:', error)
   }
 }
 
@@ -121,15 +263,117 @@ const clearGameState = () => {
   }
 }
 
-// Helper function to get random word (excluding previously used words)
-const getRandomWord = () => {
-  const history = loadWordHistory()
-  const availableWords = ANSWER_WORDS.filter(word => !history.includes(word))
+// Claude API integration
+const callClaudeAPI = async (prompt, apiKey) => {
+  try {
+    // Use Cloudflare Worker if URL is configured, otherwise direct API call
+    const apiUrl = CLOUDFLARE_WORKER_URL || 'https://api.anthropic.com/v1/messages'
+    const useWorker = !!CLOUDFLARE_WORKER_URL
 
-  // If all words have been used, reset history and use all words again
+    // Build headers based on whether we're using the worker or not
+    const headers = {
+      'Content-Type': 'application/json'
+    }
+
+    if (useWorker) {
+      // Worker expects API key in X-API-Key header
+      headers['X-API-Key'] = apiKey
+    } else {
+      // Direct API call uses x-api-key header
+      headers['x-api-key'] = apiKey
+      headers['anthropic-version'] = '2023-06-01'
+    }
+
+    const response = await fetch(apiUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model: 'claude-haiku-3-5-20241022',
+        max_tokens: 50,
+        messages: [{
+          role: 'user',
+          content: prompt
+        }]
+      })
+    })
+
+    if (!response.ok) {
+      const error = await response.json()
+      const errorMessage = error.error?.message || 'API request failed'
+
+      // Provide user-friendly error messages
+      if (response.status === 401) {
+        throw new Error('Invalid API key. Please check your key in the debug panel.')
+      } else if (response.status === 429) {
+        throw new Error('API rate limit exceeded. Please try again in a moment.')
+      } else if (response.status >= 500) {
+        throw new Error('Claude API is temporarily unavailable.')
+      } else {
+        throw new Error(errorMessage)
+      }
+    }
+
+    const data = await response.json()
+    return data.content[0].text.trim().toUpperCase()
+  } catch (error) {
+    if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
+      const workerHint = CLOUDFLARE_WORKER_URL
+        ? 'Check your Cloudflare Worker is running and accessible.'
+        : 'Network error. Try deploying a Cloudflare Worker to bypass CORS restrictions.'
+      throw new Error(`Network error. ${workerHint}`)
+    }
+    throw error
+  }
+}
+
+// Optimized AI prompt generation
+const generateOptimizedPrompt = (gameHistory, usedWords) => {
+  const totalGames = gameHistory.length
+  const wins = gameHistory.filter(g => g.r > 0).length
+  const winRate = totalGames > 0 ? Math.round((wins / totalGames) * 100) : 0
+  const wonGames = gameHistory.filter(g => g.r > 0)
+  const avgGuesses = wonGames.length > 0
+    ? Math.round((wonGames.reduce((sum, g) => sum + g.r, 0) / wonGames.length) * 10) / 10
+    : 0
+
+  // Format recent games compactly: WORD(result,understanding,source)
+  const recentCompact = gameHistory.slice(0, 20).map(g => {
+    let str = `${g.w}(${g.r}`
+    if (g.u) str += `,${g.u}`
+    str += `,${g.src === 'ai' ? 'a' : 'l'})`
+    return str
+  }).join(',')
+
+  // Limit used words to last 100 (or all if less than 100)
+  const usedArray = Array.from(usedWords)
+  const recentUsed = usedArray.slice(-100).join(',')
+
+  return `Select next 5-letter English word for user:
+Stats: ${totalGames}games, ${winRate}%win, ${avgGuesses}avg
+Recent20: ${recentCompact}
+Format: WORD(result,understanding,source) where result=1-6 if won or -1 if lost, source=a(AI) or l(list)
+Avoid: ${recentUsed}
+Return only the word, nothing else.`
+}
+
+// Get word selection reasoning
+const getWordReasoning = async (word, gameHistory, apiKey) => {
+  const recentGames = gameHistory.slice(0, 5).map(g =>
+    `${g.w}(${g.r > 0 ? 'won' : 'lost'})`
+  ).join(',')
+
+  const prompt = `You selected "${word}" for a user who recently played: ${recentGames}. In ONE sentence, explain why this word is appropriate for their skill level.`
+
+  return await callClaudeAPI(prompt, apiKey)
+}
+
+// Helper function to get random word (excluding previously used words)
+const getRandomWord = (usedWords) => {
+  const availableWords = ANSWER_WORDS.filter(word => !usedWords.has(word))
+
+  // If all words have been used, return null to show victory dialog
   if (availableWords.length === 0) {
-    resetWordHistory()
-    return ANSWER_WORDS[Math.floor(Math.random() * ANSWER_WORDS.length)]
+    return null
   }
 
   return availableWords[Math.floor(Math.random() * availableWords.length)]
@@ -152,10 +396,12 @@ function WordWise() {
     if (savedState) {
       return savedState
     }
-    const newWord = getRandomWord()
+    const usedWords = loadUsedWords()
+    const newWord = getRandomWord(usedWords)
     // Don't add to history yet - only add when game is completed
     return {
       targetWord: newWord,
+      wordSource: 'list',  // First game is always random
       guesses: Array(MAX_ATTEMPTS).fill(''),
       currentGuess: '',
       currentRow: 0,
@@ -165,9 +411,11 @@ function WordWise() {
   }
 
   const initialState = initializeGameState()
-  const [wordHistory, setWordHistory] = useState(() => loadWordHistory())
+  const [usedWords, setUsedWords] = useState(() => loadUsedWords())
+  const [gameHistory, setGameHistory] = useState(() => loadGameHistory())
 
   const [targetWord, setTargetWord] = useState(initialState.targetWord)
+  const [wordSource, setWordSource] = useState(initialState.wordSource || 'list')
   const [guesses, setGuesses] = useState(initialState.guesses)
   const [currentGuess, setCurrentGuess] = useState(initialState.currentGuess || '')
   const [currentRow, setCurrentRow] = useState(initialState.currentRow)
@@ -175,20 +423,36 @@ function WordWise() {
   const [keyColors, setKeyColors] = useState(initialState.keyColors)
   const [errorMessage, setErrorMessage] = useState('')
   const [stats, setStats] = useState(() => loadStats())
+  const [aiEnabled, setAIEnabled] = useState(() => loadAIEnabled())
+  const [showReasoning, setShowReasoning] = useState(() => loadShowReasoning())
+  const [apiKey, setAPIKey] = useState(() => loadAPIKey())
+  const [currentReasoning, setCurrentReasoning] = useState(null)
+  const [isLoadingWord, setIsLoadingWord] = useState(false)
+  const [showAPIKeyDialog, setShowAPIKeyDialog] = useState(false)
+  const [apiKeyInput, setAPIKeyInput] = useState('')
   const [showStatsModal, setShowStatsModal] = useState(false)
   const [showDebugPanel, setShowDebugPanel] = useState(false)
   const [showLearnModal, setShowLearnModal] = useState(false)
   const [showGameOverModal, setShowGameOverModal] = useState(false)
+  const [showFeedbackModal, setShowFeedbackModal] = useState(false)
+  const [showVictoryDialog, setShowVictoryDialog] = useState(false)
   const [definitionData, setDefinitionData] = useState(null)
   const [definitionLoading, setDefinitionLoading] = useState(false)
   const [definitionError, setDefinitionError] = useState(null)
   const [lastWinRow, setLastWinRow] = useState(null)
+  const [pendingUnderstanding, setPendingUnderstanding] = useState(() => loadPendingUnderstanding())
   const errorTimeoutRef = useRef(null)
   const gameEndedRef = useRef(initialState.gameStatus !== 'playing')
+  const pendingNewGameRef = useRef(false)
 
   // Handle physical keyboard input
   useEffect(() => {
     const handleKeyDown = (e) => {
+      // Block keyboard input when any modal is open
+      if (showStatsModal || showLearnModal || showFeedbackModal || showAPIKeyDialog || showVictoryDialog) {
+        return
+      }
+
       if (gameStatus !== 'playing') return
 
       const key = e.key.toUpperCase()
@@ -204,25 +468,15 @@ function WordWise() {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [currentGuess, currentRow, gameStatus])
+  }, [currentGuess, currentRow, gameStatus, showStatsModal, showLearnModal, showFeedbackModal, showAPIKeyDialog, showVictoryDialog])
 
   // Update statistics when game ends
   useEffect(() => {
     if (gameStatus !== 'playing' && !gameEndedRef.current) {
       gameEndedRef.current = true
-      updateStatistics(gameStatus, currentRow + 1)
 
-      // Add word to history when game is completed
-      addWordToHistory(targetWord)
-      setWordHistory(loadWordHistory())
-
-      setShowGameOverModal(true)
-
-      // Auto-show statistics after a brief delay
-      setTimeout(() => {
-        setShowGameOverModal(false)
-        setShowStatsModal(true)
-      }, 2500)
+      // Show result dialog immediately
+      setShowFeedbackModal(true)
     }
   }, [gameStatus])
 
@@ -249,9 +503,16 @@ function WordWise() {
     }
   }, [])
 
-  const updateStatistics = (status, guessCount) => {
+  const updateStatistics = (status, guessCount, source) => {
     const newStats = { ...stats }
     newStats.played += 1
+
+    // Track word source
+    if (source === 'ai') {
+      newStats.aiWords = (newStats.aiWords || 0) + 1
+    } else {
+      newStats.listWords = (newStats.listWords || 0) + 1
+    }
 
     if (status === 'won') {
       newStats.wins += 1
@@ -265,6 +526,224 @@ function WordWise() {
 
     saveStats(newStats)
     setStats(newStats)
+  }
+
+  const saveGameToHistory = () => {
+    // Save game without understanding rating (rating will be added later from Learn More)
+    const result = gameStatus === 'won' ? currentRow + 1 : -1
+
+    // Update statistics
+    updateStatistics(gameStatus, currentRow + 1, wordSource)
+
+    // Add to game history without understanding rating
+    addGameToHistory(targetWord, result, null, wordSource)
+    setGameHistory(loadGameHistory())
+
+    // Add to used words
+    addUsedWord(targetWord)
+    setUsedWords(loadUsedWords())
+  }
+
+  const handleCloseFeedback = () => {
+    // Save game to history if not already saved
+    if (!usedWords.has(targetWord)) {
+      saveGameToHistory()
+    }
+    setShowFeedbackModal(false)
+  }
+
+  const handleLearnMore = () => {
+    // Save game to history if not already saved (in case they click Learn without closing dialog)
+    if (!usedWords.has(targetWord)) {
+      saveGameToHistory()
+    }
+    fetchDefinition(targetWord)
+  }
+
+  const handlePlayAgain = () => {
+    // Save game to history if not already saved (in case they click Play Again without closing dialog)
+    if (!usedWords.has(targetWord)) {
+      saveGameToHistory()
+    }
+    startNewGame()
+  }
+
+  const handleUnderstandingRating = (rating) => {
+    // Save rating to pending storage
+    savePendingUnderstanding(rating)
+    setPendingUnderstanding(rating)
+  }
+
+  const handleAIToggle = (enabled) => {
+    setAIEnabled(enabled)
+    saveAIEnabled(enabled)
+  }
+
+  const handleShowReasoningToggle = (enabled) => {
+    setShowReasoning(enabled)
+    saveShowReasoning(enabled)
+  }
+
+  const handleAddAPIKey = () => {
+    setAPIKeyInput(apiKey || '')
+    setShowAPIKeyDialog(true)
+  }
+
+  const handleSaveAPIKey = () => {
+    const key = apiKeyInput.trim()
+    if (key) {
+      saveAPIKey(key)
+      setAPIKey(key)
+    }
+    setShowAPIKeyDialog(false)
+    setAPIKeyInput('')
+  }
+
+  const handleClearAPIKey = () => {
+    if (window.confirm('Remove your API key from this device?')) {
+      saveAPIKey(null)
+      setAPIKey(null)
+    }
+  }
+
+  const handleClearUsedWords = () => {
+    if (window.confirm('Are you sure you want to clear all used words? This will allow all words to appear again.')) {
+      clearUsedWords()
+      setUsedWords(new Set())
+    }
+  }
+
+  const startNewGame = async () => {
+    try {
+      setIsLoadingWord(true)
+      setCurrentReasoning(null)
+
+      const availableFromList = ANSWER_WORDS.filter(w => !usedWords.has(w))
+
+      // Check if random mode or insufficient history
+      if (!aiEnabled || gameHistory.length < 5) {
+        if (availableFromList.length === 0) {
+          setShowVictoryDialog(true)
+          setIsLoadingWord(false)
+          return
+        }
+        const word = availableFromList[Math.floor(Math.random() * availableFromList.length)]
+        startGameWithWord(word, 'list')
+        setIsLoadingWord(false)
+        return
+      }
+
+      // AI mode - check for API key
+      if (!apiKey) {
+        alert('Please add your Anthropic API key in the debug panel to use AI word selection.')
+        // Fallback to random
+        if (availableFromList.length === 0) {
+          setShowVictoryDialog(true)
+          setIsLoadingWord(false)
+          return
+        }
+        const word = availableFromList[Math.floor(Math.random() * availableFromList.length)]
+        startGameWithWord(word, 'list')
+        setIsLoadingWord(false)
+        return
+      }
+
+      try {
+        // Generate optimized prompt
+        const prompt = generateOptimizedPrompt(gameHistory, usedWords)
+
+        // Call Claude API for word
+        const word = await callClaudeAPI(prompt, apiKey)
+
+        // Validate word
+        if (!word || word.length !== 5 || !/^[A-Z]+$/.test(word)) {
+          throw new Error('Invalid word format from API')
+        }
+
+        if (usedWords.has(word)) {
+          throw new Error('API returned already-used word')
+        }
+
+        // Get reasoning if enabled
+        let reasoning = null
+        if (showReasoning) {
+          try {
+            reasoning = await getWordReasoning(word, gameHistory, apiKey)
+            setCurrentReasoning(reasoning)
+          } catch (error) {
+            console.error('Failed to get reasoning:', error)
+            // Continue without reasoning - don't fail the whole request
+          }
+        }
+
+        startGameWithWord(word, 'ai')
+        setIsLoadingWord(false)
+
+      } catch (error) {
+        console.error('AI word selection failed:', error)
+        alert(`AI word selection failed: ${error.message}\nFalling back to random selection.`)
+
+        // Fallback to random
+        if (availableFromList.length === 0) {
+          setShowVictoryDialog(true)
+          setIsLoadingWord(false)
+          return
+        }
+        const word = availableFromList[Math.floor(Math.random() * availableFromList.length)]
+        startGameWithWord(word, 'list')
+        setIsLoadingWord(false)
+      }
+    } catch (error) {
+      console.error('Error in startNewGame:', error)
+      setIsLoadingWord(false)
+    }
+  }
+
+  const startGameWithWord = (word, source) => {
+    // Save pending understanding to most recent game before starting new game
+    const pendingRating = loadPendingUnderstanding()
+    if (pendingRating !== null) {
+      const history = loadGameHistory()
+      if (history.length > 0) {
+        // Update the most recent game (last item in array)
+        history[history.length - 1].u = pendingRating
+        saveGameHistory(history)
+        setGameHistory(history)
+      }
+      // Clear pending understanding
+      savePendingUnderstanding(null)
+      setPendingUnderstanding(null)
+    }
+
+    clearGameState()
+    setTargetWord(word)
+    setWordSource(source)
+    setGuesses(Array(MAX_ATTEMPTS).fill(''))
+    setCurrentGuess('')
+    setCurrentRow(0)
+    setGameStatus('playing')
+    setKeyColors({})
+    setErrorMessage('')
+    setShowGameOverModal(false)
+    gameEndedRef.current = false
+  }
+
+  const handleVictoryStartFresh = () => {
+    if (window.confirm('Are you sure you want to start fresh? This will clear all history, used words, and stats.')) {
+      // Clear all data except AI preference
+      clearUsedWords()
+      resetStats()
+      localStorage.removeItem(HISTORY_KEY)
+
+      // Reset state
+      setUsedWords(new Set())
+      setGameHistory([])
+      setStats(getInitialStats())
+      setShowVictoryDialog(false)
+
+      // Start new game
+      startNewGame()
+    }
   }
 
   const showError = (message) => {
@@ -431,18 +910,11 @@ function WordWise() {
   }
 
   const resetGame = () => {
-    clearGameState()
-    const newWord = getRandomWord()
-    // Don't add to history yet - will be added when this game is completed
-    setTargetWord(newWord)
-    setGuesses(Array(MAX_ATTEMPTS).fill(''))
-    setCurrentGuess('')
-    setCurrentRow(0)
-    setGameStatus('playing')
-    setKeyColors({})
-    setErrorMessage('')
-    setShowGameOverModal(false)
-    gameEndedRef.current = false
+    // Save game to history if not already saved
+    if (!usedWords.has(targetWord)) {
+      saveGameToHistory()
+    }
+    startNewGame()
   }
 
   const handleResetStats = () => {
@@ -453,12 +925,6 @@ function WordWise() {
     }
   }
 
-  const handleResetWordHistory = () => {
-    if (window.confirm('Are you sure you want to reset word history? Previously used words will be able to appear again.')) {
-      resetWordHistory()
-      setWordHistory([])
-    }
-  }
 
   const fetchDefinition = async (word) => {
     setDefinitionLoading(true)
@@ -482,6 +948,10 @@ function WordWise() {
   }
 
   const handleLearnClick = () => {
+    // Save game to history if not already saved
+    if (!usedWords.has(targetWord)) {
+      saveGameToHistory()
+    }
     fetchDefinition(targetWord)
   }
 
@@ -533,23 +1003,89 @@ function WordWise() {
           <div className="debug-item">
             <strong>Target Word:</strong> {targetWord}
           </div>
+          {currentReasoning && (
+            <div className="debug-item">
+              <strong>AI Reasoning:</strong>
+              <div className="ai-reasoning">
+                {currentReasoning}
+              </div>
+            </div>
+          )}
           <div className="debug-item">
-            <strong>Remaining Words:</strong> {remainingWords.length}
+            <strong>Remaining (list):</strong> {ANSWER_WORDS.filter(w => !usedWords.has(w)).length} words
           </div>
           <div className="debug-item">
-            <strong>First 10 (random order):</strong>
+            <strong>Next 10:</strong>
             <div className="debug-words">
               {shuffledRemainingWords.join(', ')}
             </div>
           </div>
           <div className="debug-item">
-            <strong>Used Words:</strong> {wordHistory.length} / {ANSWER_WORDS.length}
+            <strong>AI Selection:</strong>
+            <div className="ai-toggle">
+              <button
+                className={`toggle-btn ${aiEnabled ? 'active' : ''}`}
+                onClick={() => handleAIToggle(true)}
+              >
+                ON
+              </button>
+              <button
+                className={`toggle-btn ${!aiEnabled ? 'active' : ''}`}
+                onClick={() => handleAIToggle(false)}
+              >
+                OFF
+              </button>
+            </div>
+          </div>
+          {aiEnabled && (
+            <div className="debug-item">
+              <strong>Show Reasoning:</strong>
+              <div className="ai-toggle">
+                <button
+                  className={`toggle-btn ${showReasoning ? 'active' : ''}`}
+                  onClick={() => handleShowReasoningToggle(true)}
+                >
+                  ON
+                </button>
+                <button
+                  className={`toggle-btn ${!showReasoning ? 'active' : ''}`}
+                  onClick={() => handleShowReasoningToggle(false)}
+                >
+                  OFF
+                </button>
+              </div>
+            </div>
+          )}
+          {aiEnabled && (
+            <div className="debug-item">
+              <strong>API Configuration:</strong>
+              <div className="api-key-section">
+                {apiKey ? (
+                  <div className="api-key-display">
+                    <span className="masked-key">{maskAPIKey(apiKey)}</span>
+                    <button className="api-key-btn edit" onClick={handleAddAPIKey}>
+                      Edit
+                    </button>
+                    <button className="api-key-btn clear" onClick={handleClearAPIKey}>
+                      Clear
+                    </button>
+                  </div>
+                ) : (
+                  <button className="add-api-key-btn" onClick={handleAddAPIKey}>
+                    Add API Key
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+          <div className="debug-item">
+            <strong>Total used:</strong> {usedWords.size} ({stats.aiWords || 0} AI, {stats.listWords || 0} list)
           </div>
           <button className="reset-stats-button" onClick={handleResetStats}>
             Reset Statistics
           </button>
-          <button className="reset-history-button" onClick={handleResetWordHistory}>
-            Reset Word History
+          <button className="reset-history-button" onClick={handleClearUsedWords}>
+            Clear Used Words
           </button>
         </div>
       )}
@@ -591,11 +1127,18 @@ function WordWise() {
       {/* Action Buttons (shown after game ends) */}
       {gameStatus !== 'playing' && (
         <div className="game-over-actions">
-          <button className="learn-button" onClick={handleLearnClick}>
+          <button className="learn-button" onClick={handleLearnClick} disabled={isLoadingWord}>
             📖 Learn
           </button>
-          <button className="play-again-button" onClick={resetGame}>
-            🔄 Play Again
+          <button className="play-again-button" onClick={resetGame} disabled={isLoadingWord}>
+            {isLoadingWord ? (
+              <>
+                <span className="spinner-small"></span>
+                Loading...
+              </>
+            ) : (
+              <>🔄 Play Again</>
+            )}
           </button>
         </div>
       )}
@@ -652,8 +1195,21 @@ function WordWise() {
               </div>
             </div>
 
+            {/* Word Sources */}
+            {(stats.aiWords > 0 || stats.listWords > 0) && (
+              <div className="word-sources">
+                <h3>WORD SOURCES</h3>
+                <div className="source-item">
+                  {stats.aiWords || 0} AI-selected ({stats.played > 0 ? Math.round(((stats.aiWords || 0) / stats.played) * 100) : 0}%)
+                </div>
+                <div className="source-item">
+                  {stats.listWords || 0} Random ({stats.played > 0 ? Math.round(((stats.listWords || 0) / stats.played) * 100) : 0}%)
+                </div>
+              </div>
+            )}
+
             <div className="guess-distribution">
-              <h3>Guess Distribution</h3>
+              <h3>GUESS DISTRIBUTION</h3>
               <div className="distribution-chart">
                 {stats.guessDistribution.map((count, index) => {
                   const percentage = maxDistribution > 0 ? (count / maxDistribution) * 100 : 0
@@ -674,29 +1230,6 @@ function WordWise() {
                   )
                 })}
               </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Win/Loss Notification Modal - Brief notification */}
-      {showGameOverModal && (
-        <div className="modal-overlay notification-overlay">
-          <div className="modal notification-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-content">
-              {gameStatus === 'won' ? (
-                <>
-                  <div className="modal-emoji">🎉</div>
-                  <h2>You won!</h2>
-                  <p>You guessed <strong>{targetWord}</strong> in {currentRow + 1} {currentRow + 1 === 1 ? 'try' : 'tries'}!</p>
-                </>
-              ) : (
-                <>
-                  <div className="modal-emoji">😔</div>
-                  <h2>Game Over</h2>
-                  <p>The word was <strong>{targetWord}</strong></p>
-                </>
-              )}
             </div>
           </div>
         </div>
@@ -774,6 +1307,138 @@ function WordWise() {
                   </div>
                 </>
               )}
+
+              {/* Understanding Rating Section */}
+              <div className="understanding-rating-section">
+                <div className="rating-separator"></div>
+                <h3>How well do you understand this word's meaning?</h3>
+                <div className="rating-buttons">
+                  {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(rating => (
+                    <button
+                      key={rating}
+                      className={`rating-btn ${pendingUnderstanding === rating ? 'selected' : ''}`}
+                      onClick={() => handleUnderstandingRating(rating)}
+                    >
+                      {rating}
+                    </button>
+                  ))}
+                </div>
+                <p className="rating-note">(You can change your rating anytime)</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Result Dialog */}
+      {showFeedbackModal && (
+        <div className="modal-overlay">
+          <div className="modal feedback-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-content">
+              {gameStatus === 'won' ? (
+                <>
+                  <div className="modal-emoji">🎉</div>
+                  <h2>You won!</h2>
+                  <p>The word was: <strong>{targetWord}</strong></p>
+                  <p>Guessed in {currentRow + 1} {currentRow + 1 === 1 ? 'try' : 'tries'}</p>
+                </>
+              ) : (
+                <>
+                  <div className="modal-emoji">😔</div>
+                  <h2>Game Over</h2>
+                  <p>The word was: <strong>{targetWord}</strong></p>
+                </>
+              )}
+
+              <p className="word-source">
+                Word source: {wordSource === 'ai' ? 'AI-selected for your level' : 'Random from list'}
+              </p>
+
+              <button className="close-result-button" onClick={handleCloseFeedback}>
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* API Key Dialog */}
+      {showAPIKeyDialog && (
+        <div className="modal-overlay" onClick={() => setShowAPIKeyDialog(false)}>
+          <div className="modal api-key-dialog" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>Anthropic API Key</h2>
+              <button className="close-button" onClick={() => setShowAPIKeyDialog(false)}>
+                ✕
+              </button>
+            </div>
+
+            <div className="modal-content">
+              <p>Enter your Anthropic API key to enable AI word selection:</p>
+
+              <input
+                type="password"
+                className="api-key-input"
+                value={apiKeyInput}
+                onChange={(e) => setAPIKeyInput(e.target.value)}
+                placeholder="sk-ant-..."
+                autoFocus
+              />
+
+              <div className="api-key-warning">
+                ⚠️ Your API key will be stored in your browser's localStorage. Only add your key on devices you trust.
+              </div>
+
+              <div className="api-key-info">
+                <p>Don't have an API key? Get one from:</p>
+                <a href="https://console.anthropic.com/" target="_blank" rel="noopener noreferrer">
+                  https://console.anthropic.com/
+                </a>
+              </div>
+
+              <div className="api-dialog-actions">
+                <button className="cancel-btn" onClick={() => setShowAPIKeyDialog(false)}>
+                  Cancel
+                </button>
+                <button className="save-btn" onClick={handleSaveAPIKey} disabled={!apiKeyInput.trim()}>
+                  Save
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Victory Dialog */}
+      {showVictoryDialog && (
+        <div className="modal-overlay">
+          <div className="modal victory-dialog" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-content">
+              <div className="modal-emoji">🎉</div>
+              <h2>INCREDIBLE ACHIEVEMENT!</h2>
+              <p>You've played EVERY possible word!</p>
+
+              <div className="victory-stats">
+                <h3>📊 Final Statistics:</h3>
+                <ul>
+                  <li>{stats.listWords || 0} words from the standard list</li>
+                  <li>{stats.aiWords || 0} AI-selected words</li>
+                  <li>{usedWords.size} total unique words</li>
+                  <li>{stats.wins} wins ({winPercentage}%)</li>
+                  <li>Max streak: {stats.maxStreak}</li>
+                </ul>
+              </div>
+
+              <p className="victory-message">You've truly mastered WordWise!</p>
+
+              <div className="victory-actions">
+                <button className="start-fresh-btn" onClick={handleVictoryStartFresh}>
+                  Start Fresh
+                </button>
+                <button className="close-btn" onClick={() => setShowVictoryDialog(false)}>
+                  Close
+                </button>
+              </div>
             </div>
           </div>
         </div>
