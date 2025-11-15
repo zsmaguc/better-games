@@ -343,7 +343,7 @@ const generateOptimizedPrompt = (gameHistory, usedWords) => {
   const recentUsed = usedArray.slice(-100).join(',')
 
   return `Select next 5-letter English word for user:
-Stats: ${totalGames}games, ${winRate}%win, ${avgGuesses}avg
+Stats: ${totalGames} games, ${winRate}% win, ${avgGuesses} avg
 Recent20: ${recentCompact}
 Format: WORD(result,understanding,source) where result=1-6 if won or -1 if lost, source=a(AI) or l(list)
 Avoid: ${recentUsed}
@@ -425,6 +425,7 @@ function WordWise() {
   const [showAPIKeyDialog, setShowAPIKeyDialog] = useState(false)
   const [apiKeyInput, setAPIKeyInput] = useState('')
   const [showStatsModal, setShowStatsModal] = useState(false)
+  const [showSettingsModal, setShowSettingsModal] = useState(false)
   const [showDebugPanel, setShowDebugPanel] = useState(false)
   const [showLearnModal, setShowLearnModal] = useState(false)
   const [showGameOverModal, setShowGameOverModal] = useState(false)
@@ -443,7 +444,7 @@ function WordWise() {
   useEffect(() => {
     const handleKeyDown = (e) => {
       // Block keyboard input when any modal is open
-      if (showStatsModal || showLearnModal || showFeedbackModal || showAPIKeyDialog || showVictoryDialog) {
+      if (showStatsModal || showSettingsModal || showLearnModal || showFeedbackModal || showAPIKeyDialog || showVictoryDialog) {
         return
       }
 
@@ -462,7 +463,7 @@ function WordWise() {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [currentGuess, currentRow, gameStatus, showStatsModal, showLearnModal, showFeedbackModal, showAPIKeyDialog, showVictoryDialog])
+  }, [currentGuess, currentRow, gameStatus, showStatsModal, showSettingsModal, showLearnModal, showFeedbackModal, showAPIKeyDialog, showVictoryDialog])
 
   // Update statistics when game ends
   useEffect(() => {
@@ -983,11 +984,20 @@ function WordWise() {
         </button>
         <button
           className="icon-button"
-          onClick={() => setShowDebugPanel(!showDebugPanel)}
-          title="Debug Panel"
+          onClick={() => setShowSettingsModal(true)}
+          title="Settings"
         >
-          🐛
+          ⚙️
         </button>
+        {import.meta.env.DEV && (
+          <button
+            className="icon-button"
+            onClick={() => setShowDebugPanel(!showDebugPanel)}
+            title="Debug Panel"
+          >
+            🐛
+          </button>
+        )}
       </div>
 
       {/* Debug Panel */}
@@ -1014,23 +1024,6 @@ function WordWise() {
               {shuffledRemainingWords.join(', ')}
             </div>
           </div>
-          <div className="debug-item">
-            <strong>AI Selection:</strong>
-            <div className="ai-toggle">
-              <button
-                className={`toggle-btn ${aiEnabled ? 'active' : ''}`}
-                onClick={() => handleAIToggle(true)}
-              >
-                ON
-              </button>
-              <button
-                className={`toggle-btn ${!aiEnabled ? 'active' : ''}`}
-                onClick={() => handleAIToggle(false)}
-              >
-                OFF
-              </button>
-            </div>
-          </div>
           {aiEnabled && (
             <div className="debug-item">
               <strong>Show Reasoning:</strong>
@@ -1050,28 +1043,6 @@ function WordWise() {
               </div>
             </div>
           )}
-          {aiEnabled && (
-            <div className="debug-item">
-              <strong>API Configuration:</strong>
-              <div className="api-key-section">
-                {apiKey ? (
-                  <div className="api-key-display">
-                    <span className="masked-key">{maskAPIKey(apiKey)}</span>
-                    <button className="api-key-btn edit" onClick={handleAddAPIKey}>
-                      Edit
-                    </button>
-                    <button className="api-key-btn clear" onClick={handleClearAPIKey}>
-                      Clear
-                    </button>
-                  </div>
-                ) : (
-                  <button className="add-api-key-btn" onClick={handleAddAPIKey}>
-                    Add API Key
-                  </button>
-                )}
-              </div>
-            </div>
-          )}
           <div className="debug-item">
             <strong>Total used:</strong> {usedWords.size} ({stats.aiWords || 0} AI, {stats.listWords || 0} list)
           </div>
@@ -1086,7 +1057,6 @@ function WordWise() {
 
       <div className="wordwise-header">
         <h1>WordWise</h1>
-        <p>Guess the 5-letter word in 6 tries</p>
       </div>
 
       {errorMessage && (
@@ -1229,6 +1199,77 @@ function WordWise() {
         </div>
       )}
 
+      {/* Settings Modal */}
+      {showSettingsModal && (
+        <div className="modal-overlay" onClick={() => setShowSettingsModal(false)}>
+          <div className="modal settings-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>Settings</h2>
+              <button className="close-button" onClick={() => setShowSettingsModal(false)}>
+                ✕
+              </button>
+            </div>
+
+            <div className="settings-content">
+              {/* AI Word Selection Toggle */}
+              <div className="settings-section">
+                <h3>AI Word Selection</h3>
+                <div className="ai-toggle">
+                  <button
+                    className={`toggle-btn ${aiEnabled ? 'active' : ''}`}
+                    onClick={() => handleAIToggle(true)}
+                  >
+                    ON
+                  </button>
+                  <button
+                    className={`toggle-btn ${!aiEnabled ? 'active' : ''}`}
+                    onClick={() => handleAIToggle(false)}
+                  >
+                    OFF
+                  </button>
+                </div>
+              </div>
+
+              {/* API Configuration */}
+              <div className="settings-section">
+                <h3>API Configuration</h3>
+                <div className="api-key-section">
+                  {apiKey ? (
+                    <div className="api-key-display">
+                      <div className="api-key-row">
+                        <span className="api-key-label">API Key:</span>
+                        <span className="masked-key">{maskAPIKey(apiKey)}</span>
+                      </div>
+                      <div className="api-key-actions">
+                        <button className="api-key-btn edit" onClick={handleAddAPIKey}>
+                          Edit
+                        </button>
+                        <button className="api-key-btn clear" onClick={handleClearAPIKey}>
+                          Clear
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button className="add-api-key-btn" onClick={handleAddAPIKey}>
+                      Add API Key
+                    </button>
+                  )}
+                </div>
+
+                <div className="api-key-warning-settings">
+                  ⚠️ Your API key is stored locally in your browser. Only add your key on devices you trust.
+                </div>
+              </div>
+
+              {/* Close Button */}
+              <button className="settings-close-btn" onClick={() => setShowSettingsModal(false)}>
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Learn Modal */}
       {showLearnModal && (
         <div className="modal-overlay" onClick={closeLearnModal}>
@@ -1305,7 +1346,7 @@ function WordWise() {
               {/* Understanding Rating Section */}
               <div className="understanding-rating-section">
                 <div className="rating-separator"></div>
-                <h3>How well do you understand this word's meaning?</h3>
+                <h3>How well did you know this word's meaning?</h3>
                 <div className="rating-buttons">
                   {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(rating => (
                     <button
