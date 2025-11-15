@@ -598,6 +598,10 @@ function WordWise() {
     if (window.confirm('Remove your API key from this device?')) {
       saveAPIKey(null)
       setAPIKey(null)
+      // Automatically disable AI if it's currently enabled
+      if (aiEnabled) {
+        handleAIToggle(false)
+      }
     }
   }
 
@@ -1218,6 +1222,8 @@ function WordWise() {
                   <button
                     className={`toggle-btn ${aiEnabled ? 'active' : ''}`}
                     onClick={() => handleAIToggle(true)}
+                    disabled={!apiKey}
+                    title={!apiKey ? 'Add an API key to enable AI word selection' : ''}
                   >
                     ON
                   </button>
@@ -1228,6 +1234,11 @@ function WordWise() {
                     OFF
                   </button>
                 </div>
+                {!apiKey && (
+                  <p className="ai-toggle-hint">
+                    💡 Add an API key to enable AI word selection
+                  </p>
+                )}
               </div>
 
               {/* API Configuration */}

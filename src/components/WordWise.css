@@ -1101,7 +1101,7 @@
   transition: all 0.2s ease;
 }
 
-.toggle-btn:hover {
+.toggle-btn:hover:not(:disabled) {
   background-color: var(--border);
 }
 
@@ -1109,6 +1109,29 @@
   background-color: var(--primary);
   color: white;
   border-color: var(--primary);
+}
+
+.toggle-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background-color: var(--bg);
+}
+
+.toggle-btn:disabled:hover {
+  background-color: var(--bg);
+  transform: none;
+}
+
+.ai-toggle-hint {
+  margin-top: 0.75rem;
+  margin-bottom: 0;
+  padding: 0.5rem 0.75rem;
+  background-color: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 4px;
+  color: #1e40af;
+  font-size: 0.875rem;
+  line-height: 1.5;
 }
 
 /* Feedback Modal */

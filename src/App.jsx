@@ -1,16 +1,46 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import './App.css'
 import WordWise from './components/WordWise'
 
 function App() {
-  const [currentPage, setCurrentPage] = useState('home')
+  // Initialize from hash or default to home
+  const getInitialRoute = () => {
+    const hash = window.location.hash
+    if (hash === '#/wordwise') return 'wordwise'
+    return 'home'
+  }
+
+  const [currentPage, setCurrentPage] = useState(getInitialRoute)
+
+  // Listen for hash changes
+  useEffect(() => {
+    const handleHashChange = () => {
+      const hash = window.location.hash
+      if (hash === '#/wordwise') {
+        setCurrentPage('wordwise')
+      } else {
+        setCurrentPage('home')
+      }
+    }
+
+    window.addEventListener('hashchange', handleHashChange)
+    return () => window.removeEventListener('hashchange', handleHashChange)
+  }, [])
+
+  const navigateToGame = (game) => {
+    window.location.hash = `#/${game}`
+  }
+
+  const navigateToHome = () => {
+    window.location.hash = '#/'
+  }
 
   if (currentPage === 'wordwise') {
     return (
       <div className="app">
         <button
           className="back-button"
-          onClick={() => setCurrentPage('home')}
+          onClick={navigateToHome}
         >
           ← Back to Games
         </button>
@@ -31,7 +61,7 @@ function App() {
           title="WordWise"
           description="Educational word guessing game"
           emoji="📚"
-          onClick={() => setCurrentPage('wordwise')}
+          onClick={() => navigateToGame('wordwise')}
         />
       </main>
 
