@@ -16,10 +16,22 @@ const SHOW_REASONING_KEY = 'wordwise-show-reasoning'  // Show AI reasoning toggl
 const TIER2_FOCUS_KEY = 'wordwise-tier2-focus'  // Tier II vocabulary focus toggle
 const EXTENDED_INFO_KEY = 'wordwise-extended-info'  // Extended word information toggle
 const TOKEN_USAGE_KEY = 'wordwise-token-usage'  // AI token usage tracking (dev only)
+const SYNC_CODE_KEY = 'wordwise-sync-code'  // Cloud sync code
+const SYNC_VERSION_KEY = 'wordwise-sync-version'  // Cloud sync version number
+const SYNC_ENABLED_KEY = 'wordwise-sync-enabled'  // Cloud sync enabled toggle
 const MAX_HISTORY_SIZE = 20
 const MAX_TOKEN_USAGE_SIZE = 100
 
 const CLOUDFLARE_WORKER_URL = 'https://wordwise-proxy.zsmaguc.workers.dev'
+
+// UUID v4 generator for game IDs
+function generateUUID() {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+    const r = Math.random() * 16 | 0
+    const v = c === 'x' ? r : (r & 0x3 | 0x8)
+    return v.toString(16)
+  })
+}
 
 const KEYBOARD_ROWS = [
   ['Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P'],
@@ -94,12 +106,19 @@ const saveGameHistory = (history) => {
 
 const addGameToHistory = (word, result, understanding, source) => {
   const history = loadGameHistory()
-  const entry = { w: word, r: result, src: source }
+  const entry = {
+    id: generateUUID(),  // Unique game ID for sync merge
+    w: word,
+    r: result,
+    src: source,
+    t: Date.now()  // Timestamp for conflict resolution
+  }
   if (understanding !== null && understanding !== undefined) {
     entry.u = understanding
   }
   history.push(entry)
   saveGameHistory(history)
+  return entry  // Return the entry for potential sync triggering
 }
 
 // Used words helper functions (all words ever played)
@@ -320,6 +339,211 @@ const clearTokenUsage = () => {
     localStorage.removeItem(TOKEN_USAGE_KEY)
   } catch (error) {
     console.error('Error clearing token usage:', error)
+  }
+}
+
+// Cloud sync helper functions
+const loadSyncCode = () => {
+  try {
+    return localStorage.getItem(SYNC_CODE_KEY) || null
+  } catch (error) {
+    console.error('Error loading sync code:', error)
+    return null
+  }
+}
+
+const saveSyncCode = (code) => {
+  try {
+    if (code) {
+      localStorage.setItem(SYNC_CODE_KEY, code)
+    } else {
+      localStorage.removeItem(SYNC_CODE_KEY)
+    }
+  } catch (error) {
+    console.error('Error saving sync code:', error)
+  }
+}
+
+const loadSyncVersion = () => {
+  try {
+    const stored = localStorage.getItem(SYNC_VERSION_KEY)
+    return stored ? parseInt(stored) : 0
+  } catch (error) {
+    console.error('Error loading sync version:', error)
+    return 0
+  }
+}
+
+const saveSyncVersion = (version) => {
+  try {
+    localStorage.setItem(SYNC_VERSION_KEY, version.toString())
+  } catch (error) {
+    console.error('Error saving sync version:', error)
+  }
+}
+
+const loadSyncEnabled = () => {
+  try {
+    const stored = localStorage.getItem(SYNC_ENABLED_KEY)
+    return stored === 'true'
+  } catch (error) {
+    console.error('Error loading sync enabled:', error)
+    return false
+  }
+}
+
+const saveSyncEnabled = (enabled) => {
+  try {
+    localStorage.setItem(SYNC_ENABLED_KEY, enabled ? 'true' : 'false')
+  } catch (error) {
+    console.error('Error saving sync enabled:', error)
+  }
+}
+
+// Intelligent merge strategy for synced data
+const intelligentMerge = (localData, remoteData) => {
+  const merged = {
+    stats: {},
+    gameHistory: [],
+    usedWords: [],
+    settings: {}
+  }
+
+  // Stats: Use max values for all metrics
+  const localStats = localData.stats || getInitialStats()
+  const remoteStats = remoteData.stats || getInitialStats()
+
+  merged.stats = {
+    played: Math.max(localStats.played || 0, remoteStats.played || 0),
+    wins: Math.max(localStats.wins || 0, remoteStats.wins || 0),
+    currentStreak: Math.max(localStats.currentStreak || 0, remoteStats.currentStreak || 0),
+    maxStreak: Math.max(localStats.maxStreak || 0, remoteStats.maxStreak || 0),
+    guessDistribution: (localStats.guessDistribution || [0,0,0,0,0,0]).map((val, idx) =>
+      Math.max(val, (remoteStats.guessDistribution || [0,0,0,0,0,0])[idx] || 0)
+    ),
+    aiWords: Math.max(localStats.aiWords || 0, remoteStats.aiWords || 0),
+    listWords: Math.max(localStats.listWords || 0, remoteStats.listWords || 0)
+  }
+
+  // Game history: Merge by unique game ID, keep most recent for duplicates
+  const historyMap = new Map()
+  const localHistory = localData.gameHistory || []
+  const remoteHistory = remoteData.gameHistory || []
+
+  // Add all local games
+  localHistory.forEach(game => {
+    if (game.id) {
+      historyMap.set(game.id, game)
+    }
+  })
+
+  // Add remote games, overwrite if remote timestamp is newer
+  remoteHistory.forEach(game => {
+    if (game.id) {
+      const existing = historyMap.get(game.id)
+      if (!existing || (game.t && existing.t && game.t > existing.t)) {
+        historyMap.set(game.id, game)
+      }
+    }
+  })
+
+  // Convert map to array and sort by timestamp (most recent last)
+  merged.gameHistory = Array.from(historyMap.values())
+    .sort((a, b) => (a.t || 0) - (b.t || 0))
+    .slice(-MAX_HISTORY_SIZE)  // Keep last 20 games
+
+  // Used words: Union of both sets
+  const localWords = new Set(localData.usedWords || [])
+  const remoteWords = new Set(remoteData.usedWords || [])
+  merged.usedWords = Array.from(new Set([...localWords, ...remoteWords]))
+
+  // Settings: Prefer local values (user's current device settings)
+  // But sync preferences like tier2Focus and extendedInfo
+  merged.settings = {
+    aiEnabled: localData.settings?.aiEnabled !== undefined ? localData.settings.aiEnabled : (remoteData.settings?.aiEnabled || true),
+    showReasoning: localData.settings?.showReasoning !== undefined ? localData.settings.showReasoning : (remoteData.settings?.showReasoning || false),
+    tier2Focus: localData.settings?.tier2Focus !== undefined ? localData.settings.tier2Focus : (remoteData.settings?.tier2Focus || false),
+    extendedInfo: localData.settings?.extendedInfo !== undefined ? localData.settings.extendedInfo : (remoteData.settings?.extendedInfo || false)
+    // Note: apiKey is explicitly NOT synced for security
+  }
+
+  return merged
+}
+
+// Sync API functions
+const generateSyncCode = async (localData) => {
+  try {
+    const response = await fetch(`${CLOUDFLARE_WORKER_URL}/sync/generate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ data: localData })
+    })
+
+    if (!response.ok) {
+      const error = await response.json()
+      throw new Error(error.error || 'Failed to generate sync code')
+    }
+
+    const result = await response.json()
+    return result.code
+  } catch (error) {
+    console.error('Error generating sync code:', error)
+    throw error
+  }
+}
+
+const fetchSyncData = async (code) => {
+  try {
+    const response = await fetch(`${CLOUDFLARE_WORKER_URL}/sync/${code}`, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    })
+
+    if (!response.ok) {
+      const error = await response.json()
+      throw new Error(error.error || 'Failed to fetch sync data')
+    }
+
+    return await response.json()
+  } catch (error) {
+    console.error('Error fetching sync data:', error)
+    throw error
+  }
+}
+
+const updateSyncData = async (code, data, version) => {
+  try {
+    const response = await fetch(`${CLOUDFLARE_WORKER_URL}/sync/${code}`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ data, version })
+    })
+
+    if (!response.ok) {
+      const error = await response.json()
+
+      // Handle version conflict
+      if (response.status === 409) {
+        return {
+          conflict: true,
+          currentVersion: error.currentVersion,
+          currentData: error.currentData
+        }
+      }
+
+      throw new Error(error.error || 'Failed to update sync data')
+    }
+
+    return await response.json()
+  } catch (error) {
+    console.error('Error updating sync data:', error)
+    throw error
   }
 }
 
@@ -687,6 +911,12 @@ function WordWise() {
   const [historyPage, setHistoryPage] = useState(0)
   const [lastWinRow, setLastWinRow] = useState(null)
   const [pendingUnderstanding, setPendingUnderstanding] = useState(() => loadPendingUnderstanding())
+  const [syncCode, setSyncCode] = useState(() => loadSyncCode())
+  const [syncEnabled, setSyncEnabled] = useState(() => loadSyncEnabled())
+  const [syncVersion, setSyncVersion] = useState(() => loadSyncVersion())
+  const [syncStatus, setSyncStatus] = useState(null)  // null, 'syncing', 'success', 'error'
+  const [syncError, setSyncError] = useState(null)
+  const [syncCodeInput, setSyncCodeInput] = useState('')
   const errorTimeoutRef = useRef(null)
   const gameEndedRef = useRef(initialState.gameStatus !== 'playing')
   const pendingNewGameRef = useRef(false)
@@ -749,6 +979,22 @@ function WordWise() {
     }
   }, [])
 
+  // Sync on load (only if sync is enabled and sync code exists)
+  useEffect(() => {
+    const syncOnLoad = async () => {
+      if (syncEnabled && syncCode) {
+        try {
+          await handleSyncNow()
+        } catch (error) {
+          console.error('Failed to sync on load:', error)
+          // Don't show error on load, just log it
+        }
+      }
+    }
+
+    syncOnLoad()
+  }, [])  // Only run once on mount
+
   const updateStatistics = (status, guessCount, source) => {
     const newStats = { ...stats }
     newStats.played += 1
@@ -774,7 +1020,7 @@ function WordWise() {
     setStats(newStats)
   }
 
-  const saveGameToHistory = () => {
+  const saveGameToHistory = async () => {
     // Save game without understanding rating (rating will be added later from Learn More)
     const result = gameStatus === 'won' ? currentRow + 1 : -1
 
@@ -788,6 +1034,16 @@ function WordWise() {
     // Add to used words
     addUsedWord(targetWord)
     setUsedWords(loadUsedWords())
+
+    // Trigger cloud sync if enabled
+    if (syncEnabled && syncCode) {
+      try {
+        await handleSyncNow()
+      } catch (error) {
+        console.error('Failed to sync after game completion:', error)
+        // Don't block the game flow if sync fails
+      }
+    }
   }
 
   const handleCloseFeedback = () => {
@@ -870,6 +1126,172 @@ function WordWise() {
     if (window.confirm('Are you sure you want to clear all used words? This will allow all words to appear again.')) {
       clearUsedWords()
       setUsedWords(new Set())
+    }
+  }
+
+  // Cloud Sync handlers
+  const prepareDataForSync = () => {
+    return {
+      stats: stats,
+      gameHistory: gameHistory,
+      usedWords: Array.from(usedWords),
+      settings: {
+        aiEnabled,
+        showReasoning,
+        tier2Focus,
+        extendedInfo
+        // apiKey is explicitly NOT included for security
+      }
+    }
+  }
+
+  const applyMergedData = (mergedData) => {
+    // Apply merged stats
+    setStats(mergedData.stats)
+    saveStats(mergedData.stats)
+
+    // Apply merged game history
+    setGameHistory(mergedData.gameHistory)
+    saveGameHistory(mergedData.gameHistory)
+
+    // Apply merged used words
+    const mergedUsedWordsSet = new Set(mergedData.usedWords)
+    setUsedWords(mergedUsedWordsSet)
+    saveUsedWords(mergedUsedWordsSet)
+
+    // Apply synced settings
+    if (mergedData.settings.aiEnabled !== undefined) {
+      setAIEnabled(mergedData.settings.aiEnabled)
+      saveAIEnabled(mergedData.settings.aiEnabled)
+    }
+    if (mergedData.settings.showReasoning !== undefined) {
+      setShowReasoning(mergedData.settings.showReasoning)
+      saveShowReasoning(mergedData.settings.showReasoning)
+    }
+    if (mergedData.settings.tier2Focus !== undefined) {
+      setTier2Focus(mergedData.settings.tier2Focus)
+      saveTier2Focus(mergedData.settings.tier2Focus)
+    }
+    if (mergedData.settings.extendedInfo !== undefined) {
+      setExtendedInfo(mergedData.settings.extendedInfo)
+      saveExtendedInfo(mergedData.settings.extendedInfo)
+    }
+  }
+
+  const handleGenerateSyncCode = async () => {
+    try {
+      setSyncStatus('syncing')
+      setSyncError(null)
+
+      const localData = prepareDataForSync()
+      const code = await generateSyncCode(localData)
+
+      setSyncCode(code)
+      saveSyncCode(code)
+      setSyncVersion(1)
+      saveSyncVersion(1)
+      setSyncEnabled(true)
+      saveSyncEnabled(true)
+      setSyncStatus('success')
+
+      setTimeout(() => setSyncStatus(null), 3000)
+    } catch (error) {
+      setSyncStatus('error')
+      setSyncError(error.message)
+    }
+  }
+
+  const handleEnterSyncCode = async () => {
+    const code = syncCodeInput.trim().toUpperCase()
+    if (!code || code.length !== 9) {
+      setSyncError('Invalid sync code format. Use XXXX-YYYY format.')
+      return
+    }
+
+    try {
+      setSyncStatus('syncing')
+      setSyncError(null)
+
+      // Fetch remote data
+      const remoteData = await fetchSyncData(code)
+
+      // Merge with local data
+      const localData = prepareDataForSync()
+      const mergedData = intelligentMerge(localData, remoteData.data)
+
+      // Apply merged data
+      applyMergedData(mergedData)
+
+      // Save sync code and enable sync
+      setSyncCode(code)
+      saveSyncCode(code)
+      setSyncVersion(remoteData.version)
+      saveSyncVersion(remoteData.version)
+      setSyncEnabled(true)
+      saveSyncEnabled(true)
+      setSyncCodeInput('')
+      setSyncStatus('success')
+
+      setTimeout(() => setSyncStatus(null), 3000)
+    } catch (error) {
+      setSyncStatus('error')
+      setSyncError(error.message)
+    }
+  }
+
+  const handleSyncNow = async () => {
+    if (!syncCode) return
+
+    try {
+      setSyncStatus('syncing')
+      setSyncError(null)
+
+      // Fetch latest remote data first
+      const remoteData = await fetchSyncData(syncCode)
+
+      // Merge with local data
+      const localData = prepareDataForSync()
+      const mergedData = intelligentMerge(localData, remoteData.data)
+
+      // Apply merged data locally
+      applyMergedData(mergedData)
+
+      // Upload merged data with incremented version
+      const newVersion = remoteData.version + 1
+      const updateResult = await updateSyncData(syncCode, mergedData, newVersion)
+
+      if (updateResult.conflict) {
+        // Handle conflict by merging again with the newer data
+        const newerMerged = intelligentMerge(mergedData, updateResult.currentData.data)
+        applyMergedData(newerMerged)
+
+        // Try updating again with the correct version
+        const retryVersion = updateResult.currentVersion + 1
+        await updateSyncData(syncCode, newerMerged, retryVersion)
+        setSyncVersion(retryVersion)
+        saveSyncVersion(retryVersion)
+      } else {
+        setSyncVersion(newVersion)
+        saveSyncVersion(newVersion)
+      }
+
+      setSyncStatus('success')
+      setTimeout(() => setSyncStatus(null), 3000)
+    } catch (error) {
+      setSyncStatus('error')
+      setSyncError(error.message)
+    }
+  }
+
+  const handleDisableSync = () => {
+    if (window.confirm('Disable cloud sync? Your sync code will be removed from this device but data in the cloud will remain.')) {
+      setSyncCode(null)
+      saveSyncCode(null)
+      setSyncEnabled(false)
+      saveSyncEnabled(false)
+      setSyncVersion(0)
+      saveSyncVersion(0)
+      setSyncCodeInput('')
     }
   }
 
@@ -1655,6 +2077,114 @@ function WordWise() {
                   </div>
                 </>
               )}
+
+              {/* Cloud Sync Section */}
+              <div className="settings-section">
+                <h3>Cloud Sync</h3>
+                <p className="settings-description">Sync your progress across devices using a code</p>
+
+                {!syncCode ? (
+                  <>
+                    {/* No sync code - show options to generate or enter */}
+                    <div className="sync-options">
+                      <div className="sync-option">
+                        <h4>New Device</h4>
+                        <p>Generate a sync code to use on other devices</p>
+                        <button
+                          className="sync-btn primary"
+                          onClick={handleGenerateSyncCode}
+                          disabled={syncStatus === 'syncing'}
+                        >
+                          {syncStatus === 'syncing' ? 'Generating...' : 'Generate Sync Code'}
+                        </button>
+                      </div>
+
+                      <div className="sync-divider">OR</div>
+
+                      <div className="sync-option">
+                        <h4>Have a Code?</h4>
+                        <p>Enter your sync code from another device</p>
+                        <div className="sync-code-input-group">
+                          <input
+                            type="text"
+                            placeholder="XXXX-YYYY"
+                            value={syncCodeInput}
+                            onChange={(e) => setSyncCodeInput(e.target.value.toUpperCase())}
+                            maxLength={9}
+                            className="sync-code-input"
+                          />
+                          <button
+                            className="sync-btn primary"
+                            onClick={handleEnterSyncCode}
+                            disabled={syncStatus === 'syncing' || !syncCodeInput.trim()}
+                          >
+                            {syncStatus === 'syncing' ? 'Syncing...' : 'Use Code'}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    {/* Has sync code - show code and sync controls */}
+                    <div className="sync-active">
+                      <div className="sync-code-display">
+                        <span className="sync-code-label">Your Sync Code:</span>
+                        <span className="sync-code">{syncCode}</span>
+                        <button
+                          className="sync-code-copy"
+                          onClick={() => {
+                            navigator.clipboard.writeText(syncCode)
+                            setSyncStatus('success')
+                            setTimeout(() => setSyncStatus(null), 2000)
+                          }}
+                          title="Copy to clipboard"
+                        >
+                          📋
+                        </button>
+                      </div>
+
+                      <div className="sync-actions">
+                        <button
+                          className="sync-btn"
+                          onClick={handleSyncNow}
+                          disabled={syncStatus === 'syncing'}
+                        >
+                          {syncStatus === 'syncing' ? 'Syncing...' : 'Sync Now'}
+                        </button>
+                        <button
+                          className="sync-btn danger"
+                          onClick={handleDisableSync}
+                          disabled={syncStatus === 'syncing'}
+                        >
+                          Disable Sync
+                        </button>
+                      </div>
+
+                      <div className="sync-info">
+                        <p className="sync-description">
+                          Use this code on other devices to sync your progress. Data is synced automatically after each game.
+                        </p>
+                        <p className="sync-warning">
+                          ⚠️ Your API key is NOT synced for security. You'll need to add it on each device.
+                        </p>
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                {/* Sync status messages */}
+                {syncStatus === 'success' && (
+                  <div className="sync-message success">
+                    ✓ {syncCode ? 'Synced successfully!' : 'Code copied!'}
+                  </div>
+                )}
+                {syncStatus === 'error' && syncError && (
+                  <div className="sync-message error">
+                    ✗ {syncError}
+                  </div>
+                )}
+              </div>
 
               {/* Close Button */}
               <button className="settings-close-btn" onClick={() => setShowSettingsModal(false)}>
