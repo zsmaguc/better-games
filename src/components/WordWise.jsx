@@ -433,10 +433,9 @@ const getExtendedWordInfo = async (word, apiKey) => {
 
 1. Etymology (2 sentences max)
 2. Word family (4 related 5-letter words with brief definitions)
-3. German: translation, definition, 2 examples
-4. Croatian: translation, definition, 2 examples
+3. German and Croatian: translation, definition, 2 examples each
 
-JSON format (use short keys):
+JSON format:
 {
   "e": "etymology text",
   "f": ["WORD - def", "WORD - def", ...],
@@ -521,23 +520,19 @@ const generateOptimizedPrompt = (gameHistory, usedWords, tier2Enabled) => {
     ? Math.round((wonGames.reduce((sum, g) => sum + g.r, 0) / wonGames.length) * 10) / 10
     : 0
 
-  // Format recent games compactly: WORD(result,understanding,source)
-  const recentCompact = gameHistory.slice(0, 20).map(g => {
+  // Format recent 30 games compactly: WORD(result,understanding,source)
+  const recentCompact = gameHistory.slice(0, 30).map(g => {
     let str = `${g.w}(${g.r}`
     if (g.u) str += `,${g.u}`
     str += `,${g.src === 'ai' ? 'a' : 'l'})`
     return str
   }).join(',')
 
-  // Limit used words to last 100 (or all if less than 100)
-  const usedArray = Array.from(usedWords)
-  const recentUsed = usedArray.slice(-100).join(',')
-
   let prompt = `Select next 5-letter English word for user:
 Stats: ${totalGames} games, ${winRate}% win, ${avgGuesses} avg
-Recent20: ${recentCompact}
+Recent30: ${recentCompact}
 Format: WORD(result,understanding,source) where result=1-6 if won or -1 if lost, source=a(AI) or l(list)
-Avoid: ${recentUsed}`
+Do not repeat words from Recent30.`
 
   if (tier2Enabled) {
     prompt += `
@@ -1313,13 +1308,6 @@ function WordWise() {
         </button>
         <button
           className="icon-button"
-          onClick={() => setShowSettingsModal(true)}
-          title="Settings"
-        >
-          ⚙️
-        </button>
-        <button
-          className="icon-button"
           onClick={() => {
             setHistoryPage(0)
             setShowHistoryModal(true)
@@ -1327,6 +1315,13 @@ function WordWise() {
           title="Word History"
         >
           📜
+        </button>
+        <button
+          className="icon-button"
+          onClick={() => setShowSettingsModal(true)}
+          title="Settings"
+        >
+          ⚙️
         </button>
         {import.meta.env.DEV && (
           <>
@@ -1358,14 +1353,6 @@ function WordWise() {
           <div className="debug-item">
             <strong>Target Word:</strong> {targetWord}
           </div>
-          {currentReasoning && (
-            <div className="debug-item">
-              <strong>AI Reasoning:</strong>
-              <div className="ai-reasoning">
-                {currentReasoning}
-              </div>
-            </div>
-          )}
           <div className="debug-item">
             <strong>Remaining (list):</strong> {ANSWER_WORDS.filter(w => !usedWords.has(w)).length} words
           </div>
@@ -2053,7 +2040,7 @@ function WordWise() {
                               )}
                               {entry.reasoning && (
                                 <div className="usage-item">
-                                  • Reasoning: "{entry.reasoning.text}"
+                                  • Reasoning ({entry.reasoning.usage.input} → {entry.reasoning.usage.output}): "{entry.reasoning.text}"
                                 </div>
                               )}
                               <div className="usage-total">
