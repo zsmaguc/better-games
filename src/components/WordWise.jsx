@@ -413,10 +413,29 @@ const intelligentMerge = (localData, remoteData) => {
   const localStats = localData.stats || getInitialStats()
   const remoteStats = remoteData.stats || getInitialStats()
 
+  // Determine which device has the most recent game to get accurate currentStreak
+  const localLastGame = localHistory.length > 0 ? localHistory[localHistory.length - 1] : null
+  const remoteLastGame = remoteHistory.length > 0 ? remoteHistory[remoteHistory.length - 1] : null
+
+  // Use currentStreak from device with most recent game
+  // (currentStreak is time-sensitive - it should reflect the actual current state, not a max)
+  let currentStreakToUse = localStats.currentStreak || 0
+  if (localLastGame && remoteLastGame) {
+    // Both have games - use streak from device with most recent game
+    const localTime = localLastGame.t || 0
+    const remoteTime = remoteLastGame.t || 0
+    currentStreakToUse = remoteTime > localTime
+      ? (remoteStats.currentStreak || 0)
+      : (localStats.currentStreak || 0)
+  } else if (remoteLastGame && !localLastGame) {
+    // Only remote has games
+    currentStreakToUse = remoteStats.currentStreak || 0
+  }
+
   merged.stats = {
     played: Math.max(localStats.played || 0, remoteStats.played || 0),
     wins: Math.max(localStats.wins || 0, remoteStats.wins || 0),
-    currentStreak: Math.max(localStats.currentStreak || 0, remoteStats.currentStreak || 0),
+    currentStreak: currentStreakToUse,  // Use most recent, not max!
     maxStreak: Math.max(localStats.maxStreak || 0, remoteStats.maxStreak || 0),
     guessDistribution: (localStats.guessDistribution || [0,0,0,0,0,0]).map((val, idx) =>
       Math.max(val, (remoteStats.guessDistribution || [0,0,0,0,0,0])[idx] || 0)
@@ -427,6 +446,7 @@ const intelligentMerge = (localData, remoteData) => {
 
   // Game history: Merge by unique game ID, keep most recent for duplicates
   const historyMap = new Map()
+  const gamesWithoutId = []
   const localHistory = localData.gameHistory || []
   const remoteHistory = remoteData.gameHistory || []
 
@@ -434,6 +454,14 @@ const intelligentMerge = (localData, remoteData) => {
   localHistory.forEach(game => {
     if (game.id) {
       historyMap.set(game.id, game)
+    } else {
+      // Old game entry without ID - add UUID and timestamp
+      const updatedGame = {
+        ...game,
+        id: generateUUID(),
+        t: Date.now()
+      }
+      gamesWithoutId.push(updatedGame)
     }
   })
 
@@ -444,11 +472,22 @@ const intelligentMerge = (localData, remoteData) => {
       if (!existing || (game.t && existing.t && game.t > existing.t)) {
         historyMap.set(game.id, game)
       }
+    } else {
+      // Old game entry without ID - add UUID and timestamp
+      const updatedGame = {
+        ...game,
+        id: generateUUID(),
+        t: Date.now()
+      }
+      gamesWithoutId.push(updatedGame)
     }
   })
 
-  // Convert map to array and sort by timestamp (most recent last)
-  merged.gameHistory = Array.from(historyMap.values())
+  // Combine games with IDs and old games without IDs
+  const allGames = [...Array.from(historyMap.values()), ...gamesWithoutId]
+
+  // Convert to array and sort by timestamp (most recent last)
+  merged.gameHistory = allGames
     .sort((a, b) => (a.t || 0) - (b.t || 0))
     .slice(-MAX_HISTORY_SIZE)  // Keep last 20 games
 
@@ -911,6 +950,7 @@ function WordWise() {
   const [historyPage, setHistoryPage] = useState(0)
   const [lastWinRow, setLastWinRow] = useState(null)
   const [pendingUnderstanding, setPendingUnderstanding] = useState(() => loadPendingUnderstanding())
+  const [settingsTab, setSettingsTab] = useState('ai')  // 'ai' or 'sync'
   const [syncCode, setSyncCode] = useState(() => loadSyncCode())
   const [syncEnabled, setSyncEnabled] = useState(() => loadSyncEnabled())
   const [syncVersion, setSyncVersion] = useState(() => loadSyncVersion())
@@ -982,9 +1022,20 @@ function WordWise() {
   // Sync on load (only if sync is enabled and sync code exists)
   useEffect(() => {
     const syncOnLoad = async () => {
-      if (syncEnabled && syncCode) {
+      // Only sync if we have both sync code and it's enabled
+      if (syncEnabled && syncCode && syncCode.length === 9) {
         try {
-          await handleSyncNow()
+          // Fetch latest remote data first
+          const remoteData = await fetchSyncData(syncCode)
+
+          // Merge with local data
+          const localData = prepareDataForSync()
+          const mergedData = intelligentMerge(localData, remoteData.data)
+
+          // Apply merged data locally
+          applyMergedData(mergedData)
+
+          console.log('Synced on load successfully')
         } catch (error) {
           console.error('Failed to sync on load:', error)
           // Don't show error on load, just log it
@@ -1131,15 +1182,17 @@ function WordWise() {
 
   // Cloud Sync handlers
   const prepareDataForSync = () => {
+    // Read from localStorage to ensure we have the most recent data
+    // (React state updates are async and might not have completed)
     return {
-      stats: stats,
-      gameHistory: gameHistory,
-      usedWords: Array.from(usedWords),
+      stats: loadStats(),
+      gameHistory: loadGameHistory(),
+      usedWords: Array.from(loadUsedWords()),
       settings: {
-        aiEnabled,
-        showReasoning,
-        tier2Focus,
-        extendedInfo
+        aiEnabled: loadAIEnabled(),
+        showReasoning: loadShowReasoning(),
+        tier2Focus: loadTier2Focus(),
+        extendedInfo: loadExtendedInfo()
         // apiKey is explicitly NOT included for security
       }
     }
@@ -1970,128 +2023,146 @@ function WordWise() {
               </button>
             </div>
 
+            {/* Tab Navigation */}
+            <div className="learn-tabs">
+              <button
+                className={`learn-tab ${settingsTab === 'ai' ? 'active' : ''}`}
+                onClick={() => setSettingsTab('ai')}
+              >
+                AI Settings
+              </button>
+              <button
+                className={`learn-tab ${settingsTab === 'sync' ? 'active' : ''}`}
+                onClick={() => setSettingsTab('sync')}
+              >
+                Cloud Sync
+              </button>
+            </div>
+
             <div className="settings-content">
-              {/* Enable AI Toggle */}
-              <div className="settings-section">
-                <h3>Enable AI</h3>
-                <p className="settings-description">Use AI to select words based on your skill level</p>
-                <div className="ai-toggle">
-                  <button
-                    className={`toggle-btn ${aiEnabled ? 'active' : ''}`}
-                    onClick={() => handleAIToggle(true)}
-                    disabled={!apiKey}
-                    title={!apiKey ? 'Add an API key to enable AI' : ''}
-                  >
-                    ON
-                  </button>
-                  <button
-                    className={`toggle-btn ${!aiEnabled ? 'active' : ''}`}
-                    onClick={() => handleAIToggle(false)}
-                  >
-                    OFF
-                  </button>
-                </div>
-              </div>
-
-              {/* AI-dependent options - Only visible when AI is ON */}
-              {aiEnabled && (
+              {/* AI Settings Tab */}
+              {settingsTab === 'ai' && (
                 <>
-                  {/* Tier II Vocabulary Focus */}
+                  {/* Enable AI Toggle */}
                   <div className="settings-section">
-                    <h3>Tier II Vocabulary Focus</h3>
-                    <p className="settings-description">Prioritize academic vocabulary</p>
+                    <h3>Enable AI</h3>
+                    <p className="settings-description">Use AI to select words based on your skill level</p>
                     <div className="ai-toggle">
                       <button
-                        className={`toggle-btn ${tier2Focus ? 'active' : ''}`}
-                        onClick={() => handleTier2Toggle(true)}
+                        className={`toggle-btn ${aiEnabled ? 'active' : ''}`}
+                        onClick={() => handleAIToggle(true)}
+                        disabled={!apiKey}
+                        title={!apiKey ? 'Add an API key to enable AI' : ''}
                       >
                         ON
                       </button>
                       <button
-                        className={`toggle-btn ${!tier2Focus ? 'active' : ''}`}
-                        onClick={() => handleTier2Toggle(false)}
+                        className={`toggle-btn ${!aiEnabled ? 'active' : ''}`}
+                        onClick={() => handleAIToggle(false)}
                       >
                         OFF
                       </button>
                     </div>
                   </div>
 
-                  {/* Extended Word Information */}
-                  <div className="settings-section">
-                    <h3>Extended Word Information</h3>
-                    <p className="settings-description">Enable etymology and translations</p>
-                    <div className="ai-toggle">
-                      <button
-                        className={`toggle-btn ${extendedInfo ? 'active' : ''}`}
-                        onClick={() => handleExtendedInfoToggle(true)}
-                      >
-                        ON
-                      </button>
-                      <button
-                        className={`toggle-btn ${!extendedInfo ? 'active' : ''}`}
-                        onClick={() => handleExtendedInfoToggle(false)}
-                      >
-                        OFF
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* API Configuration */}
-                  <div className="settings-section">
-                    <h3>API Configuration</h3>
-
-                    {!apiKey && (
-                      <div className="api-key-warning-settings">
-                        ⚠️ AI requires an Anthropic API key
-                      </div>
-                    )}
-
-                    <div className="api-key-section">
-                      {apiKey ? (
-                        <div className="api-key-display">
-                          <div className="api-key-row">
-                            <span className="api-key-label">API Key:</span>
-                            <span className="masked-key">{maskAPIKey(apiKey)}</span>
-                          </div>
-                          <div className="api-key-actions">
-                            <button className="api-key-btn edit" onClick={handleAddAPIKey}>
-                              Edit
-                            </button>
-                            <button className="api-key-btn clear" onClick={handleClearAPIKey}>
-                              Clear
-                            </button>
-                          </div>
+                  {/* AI-dependent options - Only visible when AI is ON */}
+                  {aiEnabled && (
+                    <>
+                      {/* Tier II Vocabulary Focus */}
+                      <div className="settings-section">
+                        <h3>Tier II Vocabulary Focus</h3>
+                        <p className="settings-description">Prioritize academic vocabulary</p>
+                        <div className="ai-toggle">
+                          <button
+                            className={`toggle-btn ${tier2Focus ? 'active' : ''}`}
+                            onClick={() => handleTier2Toggle(true)}
+                          >
+                            ON
+                          </button>
+                          <button
+                            className={`toggle-btn ${!tier2Focus ? 'active' : ''}`}
+                            onClick={() => handleTier2Toggle(false)}
+                          >
+                            OFF
+                          </button>
                         </div>
-                      ) : (
-                        <button className="add-api-key-btn" onClick={handleAddAPIKey}>
-                          Add API Key
-                        </button>
-                      )}
-                    </div>
-
-                    {apiKey && (
-                      <div className="api-key-warning-settings">
-                        ⚠️ Your API key is stored locally in your browser. Only add your key on devices you trust.
                       </div>
-                    )}
-                  </div>
+
+                      {/* Extended Word Information */}
+                      <div className="settings-section">
+                        <h3>Extended Word Information</h3>
+                        <p className="settings-description">Enable etymology and translations</p>
+                        <div className="ai-toggle">
+                          <button
+                            className={`toggle-btn ${extendedInfo ? 'active' : ''}`}
+                            onClick={() => handleExtendedInfoToggle(true)}
+                          >
+                            ON
+                          </button>
+                          <button
+                            className={`toggle-btn ${!extendedInfo ? 'active' : ''}`}
+                            onClick={() => handleExtendedInfoToggle(false)}
+                          >
+                            OFF
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* API Configuration */}
+                      <div className="settings-section">
+                        <h3>API Configuration</h3>
+
+                        {!apiKey && (
+                          <div className="api-key-warning-settings">
+                            ⚠️ AI requires an Anthropic API key
+                          </div>
+                        )}
+
+                        <div className="api-key-section">
+                          {apiKey ? (
+                            <div className="api-key-display">
+                              <div className="api-key-row">
+                                <span className="api-key-label">API Key:</span>
+                                <span className="masked-key">{maskAPIKey(apiKey)}</span>
+                              </div>
+                              <div className="api-key-actions">
+                                <button className="api-key-btn edit" onClick={handleAddAPIKey}>
+                                  Edit
+                                </button>
+                                <button className="api-key-btn clear" onClick={handleClearAPIKey}>
+                                  Clear
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <button className="add-api-key-btn" onClick={handleAddAPIKey}>
+                              Add API Key
+                            </button>
+                          )}
+                        </div>
+
+                        {apiKey && (
+                          <div className="api-key-warning-settings">
+                            ⚠️ Your API key is stored locally in your browser. Only add your key on devices you trust.
+                          </div>
+                        )}
+                      </div>
+                    </>
+                  )}
                 </>
               )}
 
-              {/* Cloud Sync Section */}
-              <div className="settings-section">
-                <h3>Cloud Sync</h3>
-                <p className="settings-description">Sync your progress across devices using a code</p>
-
-                {!syncCode ? (
-                  <>
-                    {/* No sync code - show options to generate or enter */}
-                    <div className="sync-options">
-                      <div className="sync-option">
-                        <h4>New Device</h4>
-                        <p>Generate a sync code to use on other devices</p>
+              {/* Cloud Sync Tab */}
+              {settingsTab === 'sync' && (
+                <>
+                  {!syncCode ? (
+                    <>
+                      {/* No sync code - show options to generate or enter */}
+                      <div className="settings-section">
+                        <h3>New Device</h3>
+                        <p className="settings-description">Generate a sync code to use on other devices</p>
                         <button
-                          className="sync-btn primary"
+                          className="add-api-key-btn"
                           onClick={handleGenerateSyncCode}
                           disabled={syncStatus === 'syncing'}
                         >
@@ -2099,12 +2170,10 @@ function WordWise() {
                         </button>
                       </div>
 
-                      <div className="sync-divider">OR</div>
-
-                      <div className="sync-option">
-                        <h4>Have a Code?</h4>
-                        <p>Enter your sync code from another device</p>
-                        <div className="sync-code-input-group">
+                      <div className="settings-section">
+                        <h3>Have a Code?</h3>
+                        <p className="settings-description">Enter your sync code from another device</p>
+                        <div className="sync-code-input-wrapper">
                           <input
                             type="text"
                             placeholder="XXXX-YYYY"
@@ -2114,7 +2183,7 @@ function WordWise() {
                             className="sync-code-input"
                           />
                           <button
-                            className="sync-btn primary"
+                            className="add-api-key-btn"
                             onClick={handleEnterSyncCode}
                             disabled={syncStatus === 'syncing' || !syncCodeInput.trim()}
                           >
@@ -2122,69 +2191,72 @@ function WordWise() {
                           </button>
                         </div>
                       </div>
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    {/* Has sync code - show code and sync controls */}
-                    <div className="sync-active">
-                      <div className="sync-code-display">
-                        <span className="sync-code-label">Your Sync Code:</span>
-                        <span className="sync-code">{syncCode}</span>
-                        <button
-                          className="sync-code-copy"
-                          onClick={() => {
-                            navigator.clipboard.writeText(syncCode)
-                            setSyncStatus('success')
-                            setTimeout(() => setSyncStatus(null), 2000)
-                          }}
-                          title="Copy to clipboard"
-                        >
-                          📋
-                        </button>
+                    </>
+                  ) : (
+                    <>
+                      {/* Has sync code - show code and sync controls */}
+                      <div className="settings-section">
+                        <h3>Sync Code</h3>
+                        <div className="api-key-section">
+                          <div className="api-key-display">
+                            <div className="api-key-row">
+                              <span className="sync-code">{syncCode}</span>
+                            </div>
+                            <div className="api-key-actions">
+                              <button
+                                className="api-key-btn edit"
+                                onClick={() => {
+                                  navigator.clipboard.writeText(syncCode)
+                                  setSyncStatus('success')
+                                  setTimeout(() => setSyncStatus(null), 2000)
+                                }}
+                              >
+                                Copy
+                              </button>
+                              <button
+                                className="api-key-btn clear"
+                                onClick={handleDisableSync}
+                                disabled={syncStatus === 'syncing'}
+                              >
+                                Disable
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                        <div className="api-key-warning-settings">
+                          ⚠️ Use this code on other devices to sync your progress. Data is synced automatically after each game.
+                        </div>
                       </div>
 
-                      <div className="sync-actions">
+                      <div className="settings-section">
+                        <h3>Sync Control</h3>
                         <button
-                          className="sync-btn"
+                          className="add-api-key-btn"
                           onClick={handleSyncNow}
                           disabled={syncStatus === 'syncing'}
                         >
                           {syncStatus === 'syncing' ? 'Syncing...' : 'Sync Now'}
                         </button>
-                        <button
-                          className="sync-btn danger"
-                          onClick={handleDisableSync}
-                          disabled={syncStatus === 'syncing'}
-                        >
-                          Disable Sync
-                        </button>
-                      </div>
-
-                      <div className="sync-info">
-                        <p className="sync-description">
-                          Use this code on other devices to sync your progress. Data is synced automatically after each game.
-                        </p>
-                        <p className="sync-warning">
+                        <div className="api-key-warning-settings" style={{ marginTop: '0.75rem' }}>
                           ⚠️ Your API key is NOT synced for security. You'll need to add it on each device.
-                        </p>
+                        </div>
                       </div>
-                    </div>
-                  </>
-                )}
+                    </>
+                  )}
 
-                {/* Sync status messages */}
-                {syncStatus === 'success' && (
-                  <div className="sync-message success">
-                    ✓ {syncCode ? 'Synced successfully!' : 'Code copied!'}
-                  </div>
-                )}
-                {syncStatus === 'error' && syncError && (
-                  <div className="sync-message error">
-                    ✗ {syncError}
-                  </div>
-                )}
-              </div>
+                  {/* Sync status messages */}
+                  {syncStatus === 'success' && (
+                    <div className="sync-message success">
+                      ✓ {syncCode ? 'Synced successfully!' : 'Code copied!'}
+                    </div>
+                  )}
+                  {syncStatus === 'error' && syncError && (
+                    <div className="sync-message error">
+                      ✗ {syncError}
+                    </div>
+                  )}
+                </>
+              )}
 
               {/* Close Button */}
               <button className="settings-close-btn" onClick={() => setShowSettingsModal(false)}>
