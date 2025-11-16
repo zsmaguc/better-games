@@ -413,6 +413,10 @@ const intelligentMerge = (localData, remoteData) => {
   const localStats = localData.stats || getInitialStats()
   const remoteStats = remoteData.stats || getInitialStats()
 
+  // Get game history arrays (needed for currentStreak logic)
+  const localHistory = localData.gameHistory || []
+  const remoteHistory = remoteData.gameHistory || []
+
   // Determine which device has the most recent game to get accurate currentStreak
   const localLastGame = localHistory.length > 0 ? localHistory[localHistory.length - 1] : null
   const remoteLastGame = remoteHistory.length > 0 ? remoteHistory[remoteHistory.length - 1] : null
@@ -447,8 +451,6 @@ const intelligentMerge = (localData, remoteData) => {
   // Game history: Merge by unique game ID, keep most recent for duplicates
   const historyMap = new Map()
   const gamesWithoutId = []
-  const localHistory = localData.gameHistory || []
-  const remoteHistory = remoteData.gameHistory || []
 
   // Add all local games
   localHistory.forEach(game => {
