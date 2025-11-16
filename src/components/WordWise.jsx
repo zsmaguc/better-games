@@ -13,7 +13,11 @@ const AI_ENABLED_KEY = 'wordwise-ai-enabled'  // AI toggle preference
 const PENDING_UNDERSTANDING_KEY = 'wordwise-pending-understanding'  // Pending understanding rating
 const API_KEY_KEY = 'wordwise-api-key'  // Anthropic API key
 const SHOW_REASONING_KEY = 'wordwise-show-reasoning'  // Show AI reasoning toggle
+const TIER2_FOCUS_KEY = 'wordwise-tier2-focus'  // Tier II vocabulary focus toggle
+const EXTENDED_INFO_KEY = 'wordwise-extended-info'  // Extended word information toggle
+const TOKEN_USAGE_KEY = 'wordwise-token-usage'  // AI token usage tracking (dev only)
 const MAX_HISTORY_SIZE = 20
+const MAX_TOKEN_USAGE_SIZE = 100
 
 const CLOUDFLARE_WORKER_URL = 'https://wordwise-proxy.zsmaguc.workers.dev'
 
@@ -228,6 +232,97 @@ const saveShowReasoning = (enabled) => {
   }
 }
 
+// Tier II focus helper functions
+const loadTier2Focus = () => {
+  try {
+    const stored = localStorage.getItem(TIER2_FOCUS_KEY)
+    if (stored !== null) {
+      return stored === 'true'
+    }
+  } catch (error) {
+    console.error('Error loading Tier II focus:', error)
+  }
+  return false  // Default to OFF
+}
+
+const saveTier2Focus = (enabled) => {
+  try {
+    localStorage.setItem(TIER2_FOCUS_KEY, enabled ? 'true' : 'false')
+  } catch (error) {
+    console.error('Error saving Tier II focus:', error)
+  }
+}
+
+// Extended info helper functions
+const loadExtendedInfo = () => {
+  try {
+    const stored = localStorage.getItem(EXTENDED_INFO_KEY)
+    if (stored !== null) {
+      return stored === 'true'
+    }
+  } catch (error) {
+    console.error('Error loading extended info:', error)
+  }
+  return false  // Default to OFF
+}
+
+const saveExtendedInfo = (enabled) => {
+  try {
+    localStorage.setItem(EXTENDED_INFO_KEY, enabled ? 'true' : 'false')
+  } catch (error) {
+    console.error('Error saving extended info:', error)
+  }
+}
+
+// Token usage helper functions (dev only)
+const loadTokenUsage = () => {
+  try {
+    const stored = localStorage.getItem(TOKEN_USAGE_KEY)
+    if (stored) {
+      return JSON.parse(stored)
+    }
+  } catch (error) {
+    console.error('Error loading token usage:', error)
+  }
+  return []
+}
+
+const saveTokenUsage = (usageData) => {
+  try {
+    // Keep only last 100 entries
+    const trimmed = usageData.slice(0, MAX_TOKEN_USAGE_SIZE)
+    localStorage.setItem(TOKEN_USAGE_KEY, JSON.stringify(trimmed))
+  } catch (error) {
+    console.error('Error saving token usage:', error)
+  }
+}
+
+const storeTokenUsage = (word, type, usage, reasoningText = null) => {
+  const data = loadTokenUsage()
+
+  let entry = data.find(e => e.word === word)
+  if (!entry) {
+    entry = { word }
+    data.unshift(entry)
+  }
+
+  if (type === 'reasoning') {
+    entry.reasoning = { usage, text: reasoningText }
+  } else {
+    entry[type] = usage
+  }
+
+  saveTokenUsage(data)
+}
+
+const clearTokenUsage = () => {
+  try {
+    localStorage.removeItem(TOKEN_USAGE_KEY)
+  } catch (error) {
+    console.error('Error clearing token usage:', error)
+  }
+}
+
 // Game state helper functions
 const saveGameState = (state) => {
   try {
@@ -258,7 +353,7 @@ const clearGameState = () => {
 }
 
 // Claude API integration
-const callClaudeAPI = async (prompt, apiKey) => {
+const callClaudeAPI = async (prompt, apiKey, returnUsage = false) => {
   try {
     // Use Cloudflare Worker if URL is configured, otherwise direct API call
     const apiUrl = CLOUDFLARE_WORKER_URL || 'https://api.anthropic.com/v1/messages'
@@ -308,7 +403,19 @@ const callClaudeAPI = async (prompt, apiKey) => {
     }
 
     const data = await response.json()
-    return data.content[0].text.trim().toUpperCase()
+    const word = data.content[0].text.trim().toUpperCase()
+
+    if (returnUsage) {
+      return {
+        word,
+        usage: {
+          input: data.usage?.input_tokens || 0,
+          output: data.usage?.output_tokens || 0
+        }
+      }
+    }
+
+    return word
   } catch (error) {
     if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
       const workerHint = CLOUDFLARE_WORKER_URL
@@ -320,8 +427,92 @@ const callClaudeAPI = async (prompt, apiKey) => {
   }
 }
 
+// Get extended word information (Etymology + Translations)
+const getExtendedWordInfo = async (word, apiKey) => {
+  const prompt = `For "${word}":
+
+1. Etymology (2 sentences max)
+2. Word family (4 related 5-letter words with brief definitions)
+3. German: translation, definition, 2 examples
+4. Croatian: translation, definition, 2 examples
+
+JSON format (use short keys):
+{
+  "e": "etymology text",
+  "f": ["WORD - def", "WORD - def", ...],
+  "de": {
+    "w": "word",
+    "d": "definition",
+    "ex": ["example 1", "example 2"]
+  },
+  "hr": {
+    "w": "word",
+    "d": "definition",
+    "ex": ["example 1", "example 2"]
+  }
+}
+
+Keep under 250 words. Return ONLY valid JSON.`
+
+  try {
+    const apiUrl = CLOUDFLARE_WORKER_URL || 'https://api.anthropic.com/v1/messages'
+    const useWorker = !!CLOUDFLARE_WORKER_URL
+
+    const headers = {
+      'Content-Type': 'application/json'
+    }
+
+    if (useWorker) {
+      headers['X-API-Key'] = apiKey
+    } else {
+      headers['x-api-key'] = apiKey
+      headers['anthropic-version'] = '2023-06-01'
+    }
+
+    const response = await fetch(apiUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5',
+        max_tokens: 800,
+        messages: [{
+          role: 'user',
+          content: prompt
+        }]
+      })
+    })
+
+    if (!response.ok) {
+      const error = await response.json()
+      const errorMessage = error.error?.message || 'API request failed'
+      throw new Error(errorMessage)
+    }
+
+    const data = await response.json()
+    let text = data.content[0].text.trim()
+
+    // Strip markdown code blocks if present
+    text = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
+
+    // Parse JSON response
+    const parsed = JSON.parse(text)
+
+    // Return both parsed data and usage
+    return {
+      data: parsed,
+      usage: {
+        input: data.usage?.input_tokens || 0,
+        output: data.usage?.output_tokens || 0
+      }
+    }
+  } catch (error) {
+    console.error('Failed to get extended info:', error)
+    throw error
+  }
+}
+
 // Optimized AI prompt generation
-const generateOptimizedPrompt = (gameHistory, usedWords) => {
+const generateOptimizedPrompt = (gameHistory, usedWords, tier2Enabled) => {
   const totalGames = gameHistory.length
   const wins = gameHistory.filter(g => g.r > 0).length
   const winRate = totalGames > 0 ? Math.round((wins / totalGames) * 100) : 0
@@ -342,12 +533,29 @@ const generateOptimizedPrompt = (gameHistory, usedWords) => {
   const usedArray = Array.from(usedWords)
   const recentUsed = usedArray.slice(-100).join(',')
 
-  return `Select next 5-letter English word for user:
+  let prompt = `Select next 5-letter English word for user:
 Stats: ${totalGames} games, ${winRate}% win, ${avgGuesses} avg
 Recent20: ${recentCompact}
 Format: WORD(result,understanding,source) where result=1-6 if won or -1 if lost, source=a(AI) or l(list)
-Avoid: ${recentUsed}
+Avoid: ${recentUsed}`
+
+  if (tier2Enabled) {
+    prompt += `
+
+TIER II FOCUS: Prioritize Tier II vocabulary:
+- High-frequency across contexts (not domain-specific)
+- Academically valuable
+- Complex but not obscure
+Good: INFER, ADAPT, YIELD, IMPLY, SHIFT
+Avoid basic: CATCH, SLEEP, HAPPY, WATER
+Avoid specialized: STEAM, MOLAR, PRISM`
+  }
+
+  prompt += `
+
 Return only the word, nothing else.`
+
+  return prompt
 }
 
 // Get word selection reasoning
@@ -358,7 +566,44 @@ const getWordReasoning = async (word, gameHistory, apiKey) => {
 
   const prompt = `You selected "${word}" for a user who recently played: ${recentGames}. In ONE sentence, explain why this word is appropriate for their skill level.`
 
-  return await callClaudeAPI(prompt, apiKey)
+  // Call with usage tracking
+  const apiUrl = CLOUDFLARE_WORKER_URL || 'https://api.anthropic.com/v1/messages'
+  const useWorker = !!CLOUDFLARE_WORKER_URL
+
+  const headers = {
+    'Content-Type': 'application/json'
+  }
+
+  if (useWorker) {
+    headers['X-API-Key'] = apiKey
+  } else {
+    headers['x-api-key'] = apiKey
+    headers['anthropic-version'] = '2023-06-01'
+  }
+
+  const response = await fetch(apiUrl, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      model: 'claude-haiku-4-5',
+      max_tokens: 100,
+      messages: [{
+        role: 'user',
+        content: prompt
+      }]
+    })
+  })
+
+  const data = await response.json()
+  const text = data.content[0].text.trim()
+
+  return {
+    text,
+    usage: {
+      input: data.usage?.input_tokens || 0,
+      output: data.usage?.output_tokens || 0
+    }
+  }
 }
 
 // Helper function to get random word (excluding previously used words)
@@ -419,6 +664,8 @@ function WordWise() {
   const [stats, setStats] = useState(() => loadStats())
   const [aiEnabled, setAIEnabled] = useState(() => loadAIEnabled())
   const [showReasoning, setShowReasoning] = useState(() => loadShowReasoning())
+  const [tier2Focus, setTier2Focus] = useState(() => loadTier2Focus())
+  const [extendedInfo, setExtendedInfo] = useState(() => loadExtendedInfo())
   const [apiKey, setAPIKey] = useState(() => loadAPIKey())
   const [currentReasoning, setCurrentReasoning] = useState(null)
   const [isLoadingWord, setIsLoadingWord] = useState(false)
@@ -431,9 +678,18 @@ function WordWise() {
   const [showGameOverModal, setShowGameOverModal] = useState(false)
   const [showFeedbackModal, setShowFeedbackModal] = useState(false)
   const [showVictoryDialog, setShowVictoryDialog] = useState(false)
+  const [showHistoryModal, setShowHistoryModal] = useState(false)
+  const [showAIPanel, setShowAIPanel] = useState(false)
+  const [aiUsagePage, setAIUsagePage] = useState(0)
   const [definitionData, setDefinitionData] = useState(null)
   const [definitionLoading, setDefinitionLoading] = useState(false)
   const [definitionError, setDefinitionError] = useState(null)
+  const [learnTab, setLearnTab] = useState('definition')
+  const [extendedInfoData, setExtendedInfoData] = useState({})
+  const [extendedInfoLoading, setExtendedInfoLoading] = useState(false)
+  const [extendedInfoError, setExtendedInfoError] = useState(null)
+  const [currentLearnWord, setCurrentLearnWord] = useState(null)
+  const [historyPage, setHistoryPage] = useState(0)
   const [lastWinRow, setLastWinRow] = useState(null)
   const [pendingUnderstanding, setPendingUnderstanding] = useState(() => loadPendingUnderstanding())
   const errorTimeoutRef = useRef(null)
@@ -444,7 +700,7 @@ function WordWise() {
   useEffect(() => {
     const handleKeyDown = (e) => {
       // Block keyboard input when any modal is open
-      if (showStatsModal || showSettingsModal || showLearnModal || showFeedbackModal || showAPIKeyDialog || showVictoryDialog) {
+      if (showStatsModal || showSettingsModal || showLearnModal || showFeedbackModal || showAPIKeyDialog || showVictoryDialog || showHistoryModal || showAIPanel) {
         return
       }
 
@@ -463,7 +719,7 @@ function WordWise() {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [currentGuess, currentRow, gameStatus, showStatsModal, showSettingsModal, showLearnModal, showFeedbackModal, showAPIKeyDialog, showVictoryDialog])
+  }, [currentGuess, currentRow, gameStatus, showStatsModal, showSettingsModal, showLearnModal, showFeedbackModal, showAPIKeyDialog, showVictoryDialog, showHistoryModal, showAIPanel])
 
   // Update statistics when game ends
   useEffect(() => {
@@ -579,6 +835,16 @@ function WordWise() {
     saveShowReasoning(enabled)
   }
 
+  const handleTier2Toggle = (enabled) => {
+    setTier2Focus(enabled)
+    saveTier2Focus(enabled)
+  }
+
+  const handleExtendedInfoToggle = (enabled) => {
+    setExtendedInfo(enabled)
+    saveExtendedInfo(enabled)
+  }
+
   const handleAddAPIKey = () => {
     setAPIKeyInput(apiKey || '')
     setShowAPIKeyDialog(true)
@@ -649,10 +915,14 @@ function WordWise() {
 
       try {
         // Generate optimized prompt
-        const prompt = generateOptimizedPrompt(gameHistory, usedWords)
+        const prompt = generateOptimizedPrompt(gameHistory, usedWords, tier2Focus)
 
-        // Call Claude API for word
-        const word = await callClaudeAPI(prompt, apiKey)
+        // Call Claude API for word with usage tracking
+        const result = await callClaudeAPI(prompt, apiKey, true)
+        const word = result.word
+
+        // Store word selection token usage
+        storeTokenUsage(word, 'wordSelection', result.usage)
 
         // Validate word
         if (!word || word.length !== 5 || !/^[A-Z]+$/.test(word)) {
@@ -667,8 +937,12 @@ function WordWise() {
         let reasoning = null
         if (showReasoning) {
           try {
-            reasoning = await getWordReasoning(word, gameHistory, apiKey)
+            const reasoningResult = await getWordReasoning(word, gameHistory, apiKey)
+            reasoning = reasoningResult.text
             setCurrentReasoning(reasoning)
+
+            // Store reasoning token usage
+            storeTokenUsage(word, 'reasoning', reasoningResult.usage, reasoning)
           } catch (error) {
             console.error('Failed to get reasoning:', error)
             // Continue without reasoning - don't fail the whole request
@@ -929,6 +1203,8 @@ function WordWise() {
     setDefinitionLoading(true)
     setDefinitionError(null)
     setShowLearnModal(true)
+    setCurrentLearnWord(word)
+    setLearnTab('definition')
 
     try {
       const response = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${word.toLowerCase()}`)
@@ -946,6 +1222,47 @@ function WordWise() {
     }
   }
 
+  const fetchExtendedInfo = async (word) => {
+    // Check if already fetched for this word
+    if (extendedInfoData[word]) {
+      return
+    }
+
+    setExtendedInfoLoading(true)
+    setExtendedInfoError(null)
+
+    try {
+      const result = await getExtendedWordInfo(word, apiKey)
+      setExtendedInfoData(prev => ({
+        ...prev,
+        [word]: result.data
+      }))
+
+      // Store extended info token usage
+      storeTokenUsage(word, 'extendedInfo', result.usage)
+    } catch (error) {
+      setExtendedInfoError(error.message)
+    } finally {
+      setExtendedInfoLoading(false)
+    }
+  }
+
+  const handleLearnTabChange = (tab) => {
+    setLearnTab(tab)
+
+    // Lazy load extended info when switching to Etymology or Translations tab
+    if ((tab === 'etymology' || tab === 'translations') && extendedInfo && currentLearnWord && !extendedInfoData[currentLearnWord] && !extendedInfoLoading) {
+      fetchExtendedInfo(currentLearnWord)
+    }
+  }
+
+  const handleEnableExtendedInfo = () => {
+    handleExtendedInfoToggle(true)
+    if (currentLearnWord && !extendedInfoData[currentLearnWord]) {
+      fetchExtendedInfo(currentLearnWord)
+    }
+  }
+
   const handleLearnClick = () => {
     // Save game to history if not already saved
     if (!usedWords.has(targetWord)) {
@@ -954,10 +1271,18 @@ function WordWise() {
     fetchDefinition(targetWord)
   }
 
+  const handleHistoryLearnClick = (word) => {
+    setShowHistoryModal(false)
+    fetchDefinition(word)
+  }
+
   const closeLearnModal = () => {
     setShowLearnModal(false)
     setDefinitionData(null)
     setDefinitionError(null)
+    setLearnTab('definition')
+    setExtendedInfoError(null)
+    setCurrentLearnWord(null)
   }
 
   // Get remaining words for debug panel - only recalculate when guesses or currentRow changes
@@ -993,14 +1318,36 @@ function WordWise() {
         >
           ⚙️
         </button>
+        <button
+          className="icon-button"
+          onClick={() => {
+            setHistoryPage(0)
+            setShowHistoryModal(true)
+          }}
+          title="Word History"
+        >
+          📜
+        </button>
         {import.meta.env.DEV && (
-          <button
-            className="icon-button"
-            onClick={() => setShowDebugPanel(!showDebugPanel)}
-            title="Debug Panel"
-          >
-            🐛
-          </button>
+          <>
+            <button
+              className="icon-button"
+              onClick={() => setShowDebugPanel(!showDebugPanel)}
+              title="Debug Panel"
+            >
+              🐛
+            </button>
+            <button
+              className="icon-button"
+              onClick={() => {
+                setAIUsagePage(0)
+                setShowAIPanel(true)
+              }}
+              title="AI Usage"
+            >
+              AI
+            </button>
+          </>
         )}
       </div>
 
@@ -1215,15 +1562,16 @@ function WordWise() {
             </div>
 
             <div className="settings-content">
-              {/* AI Word Selection Toggle */}
+              {/* Enable AI Toggle */}
               <div className="settings-section">
-                <h3>AI Word Selection</h3>
+                <h3>Enable AI</h3>
+                <p className="settings-description">Use AI to select words based on your skill level</p>
                 <div className="ai-toggle">
                   <button
                     className={`toggle-btn ${aiEnabled ? 'active' : ''}`}
                     onClick={() => handleAIToggle(true)}
                     disabled={!apiKey}
-                    title={!apiKey ? 'Add an API key to enable AI word selection' : ''}
+                    title={!apiKey ? 'Add an API key to enable AI' : ''}
                   >
                     ON
                   </button>
@@ -1234,43 +1582,92 @@ function WordWise() {
                     OFF
                   </button>
                 </div>
-                {!apiKey && (
-                  <p className="ai-toggle-hint">
-                    💡 Add an API key to enable AI word selection
-                  </p>
-                )}
               </div>
 
-              {/* API Configuration */}
-              <div className="settings-section">
-                <h3>API Configuration</h3>
-                <div className="api-key-section">
-                  {apiKey ? (
-                    <div className="api-key-display">
-                      <div className="api-key-row">
-                        <span className="api-key-label">API Key:</span>
-                        <span className="masked-key">{maskAPIKey(apiKey)}</span>
-                      </div>
-                      <div className="api-key-actions">
-                        <button className="api-key-btn edit" onClick={handleAddAPIKey}>
-                          Edit
-                        </button>
-                        <button className="api-key-btn clear" onClick={handleClearAPIKey}>
-                          Clear
-                        </button>
-                      </div>
+              {/* AI-dependent options - Only visible when AI is ON */}
+              {aiEnabled && (
+                <>
+                  {/* Tier II Vocabulary Focus */}
+                  <div className="settings-section">
+                    <h3>Tier II Vocabulary Focus</h3>
+                    <p className="settings-description">Prioritize academic vocabulary</p>
+                    <div className="ai-toggle">
+                      <button
+                        className={`toggle-btn ${tier2Focus ? 'active' : ''}`}
+                        onClick={() => handleTier2Toggle(true)}
+                      >
+                        ON
+                      </button>
+                      <button
+                        className={`toggle-btn ${!tier2Focus ? 'active' : ''}`}
+                        onClick={() => handleTier2Toggle(false)}
+                      >
+                        OFF
+                      </button>
                     </div>
-                  ) : (
-                    <button className="add-api-key-btn" onClick={handleAddAPIKey}>
-                      Add API Key
-                    </button>
-                  )}
-                </div>
+                  </div>
 
-                <div className="api-key-warning-settings">
-                  ⚠️ Your API key is stored locally in your browser. Only add your key on devices you trust.
-                </div>
-              </div>
+                  {/* Extended Word Information */}
+                  <div className="settings-section">
+                    <h3>Extended Word Information</h3>
+                    <p className="settings-description">Enable etymology and translations</p>
+                    <div className="ai-toggle">
+                      <button
+                        className={`toggle-btn ${extendedInfo ? 'active' : ''}`}
+                        onClick={() => handleExtendedInfoToggle(true)}
+                      >
+                        ON
+                      </button>
+                      <button
+                        className={`toggle-btn ${!extendedInfo ? 'active' : ''}`}
+                        onClick={() => handleExtendedInfoToggle(false)}
+                      >
+                        OFF
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* API Configuration */}
+                  <div className="settings-section">
+                    <h3>API Configuration</h3>
+
+                    {!apiKey && (
+                      <div className="api-key-warning-settings">
+                        ⚠️ AI requires an Anthropic API key
+                      </div>
+                    )}
+
+                    <div className="api-key-section">
+                      {apiKey ? (
+                        <div className="api-key-display">
+                          <div className="api-key-row">
+                            <span className="api-key-label">API Key:</span>
+                            <span className="masked-key">{maskAPIKey(apiKey)}</span>
+                          </div>
+                          <div className="api-key-actions">
+                            <button className="api-key-btn edit" onClick={handleAddAPIKey}>
+                              Edit
+                            </button>
+                            <button className="api-key-btn clear" onClick={handleClearAPIKey}>
+                              Clear
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <button className="add-api-key-btn" onClick={handleAddAPIKey}>
+                          Add API Key
+                        </button>
+                      )}
+                    </div>
+
+                    {apiKey && (
+                      <div className="api-key-warning-settings">
+                        ⚠️ Your API key is stored locally in your browser. Only add your key on devices you trust.
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
 
               {/* Close Button */}
               <button className="settings-close-btn" onClick={() => setShowSettingsModal(false)}>
@@ -1286,71 +1683,202 @@ function WordWise() {
         <div className="modal-overlay" onClick={closeLearnModal}>
           <div className="modal learn-modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
-              <h2>{targetWord}</h2>
+              <h2>{currentLearnWord || targetWord}</h2>
               <button className="close-button" onClick={closeLearnModal}>
                 ✕
               </button>
             </div>
 
+            {/* Tab Navigation */}
+            <div className="learn-tabs">
+              <button
+                className={`learn-tab ${learnTab === 'definition' ? 'active' : ''}`}
+                onClick={() => handleLearnTabChange('definition')}
+              >
+                Definition
+              </button>
+              <button
+                className={`learn-tab ${learnTab === 'etymology' ? 'active' : ''}`}
+                onClick={() => handleLearnTabChange('etymology')}
+              >
+                Etymology
+              </button>
+              <button
+                className={`learn-tab ${learnTab === 'translations' ? 'active' : ''}`}
+                onClick={() => handleLearnTabChange('translations')}
+              >
+                Translations
+              </button>
+            </div>
+
             <div className="learn-content">
-              {definitionLoading && (
-                <div className="loading-state">
-                  <div className="spinner"></div>
-                  <p>Loading definition...</p>
-                </div>
-              )}
-
-              {definitionError && (
-                <div className="error-state">
-                  <p>{definitionError}</p>
-                  <p className="error-hint">Try searching for this word on a dictionary website.</p>
-                </div>
-              )}
-
-              {definitionData && !definitionLoading && (
+              {/* Definition Tab */}
+              {learnTab === 'definition' && (
                 <>
-                  {/* Pronunciation */}
-                  {definitionData[0]?.phonetic && (
-                    <div className="pronunciation">
-                      <strong>Pronunciation:</strong> {definitionData[0].phonetic}
+                  {definitionLoading && (
+                    <div className="loading-state">
+                      <div className="spinner"></div>
+                      <p>Loading definition...</p>
                     </div>
                   )}
 
-                  {/* Meanings */}
-                  {definitionData[0]?.meanings?.slice(0, 2).map((meaning, meaningIndex) => (
-                    <div key={meaningIndex} className="meaning-section">
-                      <h3 className="part-of-speech">{meaning.partOfSpeech}</h3>
+                  {definitionError && (
+                    <div className="error-state">
+                      <p>{definitionError}</p>
+                      <p className="error-hint">Try searching for this word on a dictionary website.</p>
+                    </div>
+                  )}
 
-                      {/* Definitions */}
-                      <div className="definitions">
-                        <strong>Definitions:</strong>
-                        <ol>
-                          {meaning.definitions.slice(0, 3).map((def, defIndex) => (
-                            <li key={defIndex}>
-                              {def.definition}
-                              {def.example && (
-                                <div className="example">
-                                  <em>Example: "{def.example}"</em>
-                                </div>
-                              )}
-                            </li>
+                  {definitionData && !definitionLoading && (
+                    <>
+                      {/* Pronunciation */}
+                      {definitionData[0]?.phonetic && (
+                        <div className="pronunciation">
+                          <strong>Pronunciation:</strong> {definitionData[0].phonetic}
+                        </div>
+                      )}
+
+                      {/* Meanings */}
+                      {definitionData[0]?.meanings?.slice(0, 2).map((meaning, meaningIndex) => (
+                        <div key={meaningIndex} className="meaning-section">
+                          <h3 className="part-of-speech">{meaning.partOfSpeech}</h3>
+
+                          {/* Definitions */}
+                          <div className="definitions">
+                            <strong>Definitions:</strong>
+                            <ol>
+                              {meaning.definitions.slice(0, 3).map((def, defIndex) => (
+                                <li key={defIndex}>
+                                  {def.definition}
+                                  {def.example && (
+                                    <div className="example">
+                                      <em>Example: "{def.example}"</em>
+                                    </div>
+                                  )}
+                                </li>
+                              ))}
+                            </ol>
+                          </div>
+                        </div>
+                      ))}
+
+                      {/* API Attribution */}
+                      <div className="api-attribution">
+                        Definitions provided by{' '}
+                        <a
+                          href="https://dictionaryapi.dev"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          Free Dictionary API
+                        </a>
+                      </div>
+                    </>
+                  )}
+                </>
+              )}
+
+              {/* Etymology Tab */}
+              {learnTab === 'etymology' && (
+                <>
+                  {!extendedInfo ? (
+                    <div className="extended-info-disabled">
+                      <h3>Etymology & Word Family</h3>
+                      <p>Extended word information is currently disabled.</p>
+                      <button className="enable-extended-btn" onClick={handleEnableExtendedInfo}>
+                        Enable Extended Info in Settings
+                      </button>
+                    </div>
+                  ) : extendedInfoLoading ? (
+                    <div className="loading-state">
+                      <div className="spinner"></div>
+                      <p>Loading etymology...</p>
+                    </div>
+                  ) : extendedInfoError ? (
+                    <div className="error-state">
+                      <p>Failed to load extended information.</p>
+                      <button className="retry-btn" onClick={() => fetchExtendedInfo(currentLearnWord)}>
+                        Retry
+                      </button>
+                    </div>
+                  ) : extendedInfoData[currentLearnWord] ? (
+                    <div className="etymology-content">
+                      <h3>Etymology & Word Family</h3>
+
+                      <div className="etymology-section">
+                        <h4>Etymology:</h4>
+                        <p>{extendedInfoData[currentLearnWord].e}</p>
+                      </div>
+
+                      <div className="word-family-section">
+                        <h4>Word Family:</h4>
+                        <ul>
+                          {extendedInfoData[currentLearnWord].f.map((item, idx) => (
+                            <li key={idx}>{item}</li>
                           ))}
-                        </ol>
+                        </ul>
                       </div>
                     </div>
-                  ))}
+                  ) : null}
+                </>
+              )}
 
-                  {/* API Attribution */}
-                  <div className="api-attribution">
-                    Definitions provided by{' '}
-                    <a
-                      href="https://dictionaryapi.dev"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                    >
-                      Free Dictionary API
-                    </a>
-                  </div>
+              {/* Translations Tab */}
+              {learnTab === 'translations' && (
+                <>
+                  {!extendedInfo ? (
+                    <div className="extended-info-disabled">
+                      <h3>Translations</h3>
+                      <p>Extended word information is currently disabled.</p>
+                      <button className="enable-extended-btn" onClick={handleEnableExtendedInfo}>
+                        Enable Extended Info in Settings
+                      </button>
+                    </div>
+                  ) : extendedInfoLoading ? (
+                    <div className="loading-state">
+                      <div className="spinner"></div>
+                      <p>Loading translations...</p>
+                    </div>
+                  ) : extendedInfoError ? (
+                    <div className="error-state">
+                      <p>Failed to load extended information.</p>
+                      <button className="retry-btn" onClick={() => fetchExtendedInfo(currentLearnWord)}>
+                        Retry
+                      </button>
+                    </div>
+                  ) : extendedInfoData[currentLearnWord] ? (
+                    <div className="translations-content">
+                      <div className="translation-section">
+                        <h3>German Translation</h3>
+                        <h4>{extendedInfoData[currentLearnWord].de.w}</h4>
+                        <p>{extendedInfoData[currentLearnWord].de.d}</p>
+                        <div className="translation-examples">
+                          <strong>Examples:</strong>
+                          <ul>
+                            {extendedInfoData[currentLearnWord].de.ex.map((ex, idx) => (
+                              <li key={idx}>{ex}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      </div>
+
+                      <div className="translation-divider"></div>
+
+                      <div className="translation-section">
+                        <h3>Croatian Translation</h3>
+                        <h4>{extendedInfoData[currentLearnWord].hr.w}</h4>
+                        <p>{extendedInfoData[currentLearnWord].hr.d}</p>
+                        <div className="translation-examples">
+                          <strong>Examples:</strong>
+                          <ul>
+                            {extendedInfoData[currentLearnWord].hr.ex.map((ex, idx) => (
+                              <li key={idx}>{ex}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
                 </>
               )}
 
@@ -1358,11 +1886,11 @@ function WordWise() {
               <div className="understanding-rating-section">
                 <div className="rating-separator"></div>
                 <h3>How well did you know this word's meaning?</h3>
-                <div className="rating-buttons">
+                <div className="rating-buttons-compact">
                   {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(rating => (
                     <button
                       key={rating}
-                      className={`rating-btn ${pendingUnderstanding === rating ? 'selected' : ''}`}
+                      className={`rating-btn-compact ${pendingUnderstanding === rating ? 'selected' : ''}`}
                       onClick={() => handleUnderstandingRating(rating)}
                     >
                       {rating}
@@ -1371,6 +1899,220 @@ function WordWise() {
                 </div>
                 <p className="rating-note">(You can change your rating anytime)</p>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Word History Modal */}
+      {showHistoryModal && (
+        <div className="modal-overlay" onClick={() => setShowHistoryModal(false)}>
+          <div className="modal history-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>Word History</h2>
+              <button className="close-button" onClick={() => setShowHistoryModal(false)}>
+                ✕
+              </button>
+            </div>
+
+            <div className="history-content">
+              {gameHistory.length === 0 ? (
+                <div className="empty-history">
+                  <p>No word history yet. Play some games to build your history!</p>
+                </div>
+              ) : (
+                <>
+                  <div className="history-list">
+                    {gameHistory
+                      .slice()
+                      .reverse()
+                      .slice(historyPage * 10, (historyPage + 1) * 10)
+                      .map((entry, index) => (
+                        <div key={index} className="history-item">
+                          <div className="history-word">{entry.w}</div>
+                          <div className="history-result">
+                            {entry.r > 0 ? (
+                              <span className="history-won">✓ Won in {entry.r} {entry.r === 1 ? 'try' : 'tries'}</span>
+                            ) : (
+                              <span className="history-lost">✗ Lost</span>
+                            )}
+                          </div>
+                          <button
+                            className="history-learn-btn"
+                            onClick={() => handleHistoryLearnClick(entry.w)}
+                          >
+                            Learn
+                          </button>
+                        </div>
+                      ))}
+                  </div>
+
+                  {gameHistory.length > 10 && (
+                    <div className="history-pagination">
+                      <div className="pagination-info">
+                        Showing {historyPage * 10 + 1}-{Math.min((historyPage + 1) * 10, gameHistory.length)} of {gameHistory.length}
+                      </div>
+                      <div className="pagination-controls">
+                        <button
+                          className="pagination-btn"
+                          onClick={() => setHistoryPage(prev => Math.max(0, prev - 1))}
+                          disabled={historyPage === 0}
+                        >
+                          &lt; Previous
+                        </button>
+                        <button
+                          className="pagination-btn"
+                          onClick={() => setHistoryPage(prev => prev + 1)}
+                          disabled={(historyPage + 1) * 10 >= gameHistory.length}
+                        >
+                          Next &gt;
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  <button className="history-close-btn" onClick={() => setShowHistoryModal(false)}>
+                    Close
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* AI Usage Panel (Dev Only) */}
+      {showAIPanel && import.meta.env.DEV && (
+        <div className="modal-overlay" onClick={() => setShowAIPanel(false)}>
+          <div className="modal ai-usage-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>AI Usage</h2>
+              <button className="close-button" onClick={() => setShowAIPanel(false)}>
+                ✕
+              </button>
+            </div>
+
+            <div className="ai-usage-content">
+              {(() => {
+                const tokenUsage = loadTokenUsage()
+
+                if (tokenUsage.length === 0) {
+                  return (
+                    <div className="empty-usage">
+                      <p>No AI usage data yet. Play some games with AI enabled!</p>
+                    </div>
+                  )
+                }
+
+                // Paginate
+                const pageData = tokenUsage.slice(aiUsagePage * 10, (aiUsagePage + 1) * 10)
+
+                // Calculate session totals across all data
+                const sessionTotals = tokenUsage.reduce((acc, entry) => {
+                  if (entry.wordSelection) {
+                    acc.input += entry.wordSelection.input
+                    acc.output += entry.wordSelection.output
+                  }
+                  if (entry.reasoning) {
+                    acc.input += entry.reasoning.usage.input
+                    acc.output += entry.reasoning.usage.output
+                  }
+                  if (entry.extendedInfo) {
+                    acc.input += entry.extendedInfo.input
+                    acc.output += entry.extendedInfo.output
+                  }
+                  return acc
+                }, { input: 0, output: 0 })
+
+                return (
+                  <>
+                    <div className="usage-list">
+                      {pageData.map((entry, index) => {
+                        const entryTotal = {
+                          input: (entry.wordSelection?.input || 0) +
+                                (entry.reasoning?.usage.input || 0) +
+                                (entry.extendedInfo?.input || 0),
+                          output: (entry.wordSelection?.output || 0) +
+                                 (entry.reasoning?.usage.output || 0) +
+                                 (entry.extendedInfo?.output || 0)
+                        }
+
+                        return (
+                          <div key={index} className="usage-entry">
+                            <div className="usage-word">{entry.word}</div>
+                            <div className="usage-details">
+                              {entry.wordSelection && (
+                                <div className="usage-item">
+                                  • Word selection: {entry.wordSelection.input} → {entry.wordSelection.output}
+                                </div>
+                              )}
+                              {entry.extendedInfo && (
+                                <div className="usage-item">
+                                  • Extended info: {entry.extendedInfo.input} → {entry.extendedInfo.output}
+                                </div>
+                              )}
+                              {entry.reasoning && (
+                                <div className="usage-item">
+                                  • Reasoning: "{entry.reasoning.text}"
+                                </div>
+                              )}
+                              <div className="usage-total">
+                                Total: {entryTotal.input} in, {entryTotal.output} out
+                              </div>
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+
+                    {tokenUsage.length > 10 && (
+                      <div className="usage-pagination">
+                        <div className="pagination-info">
+                          Showing {aiUsagePage * 10 + 1}-{Math.min((aiUsagePage + 1) * 10, tokenUsage.length)} of {tokenUsage.length}
+                        </div>
+                        <div className="pagination-controls">
+                          <button
+                            className="pagination-btn"
+                            onClick={() => setAIUsagePage(prev => Math.max(0, prev - 1))}
+                            disabled={aiUsagePage === 0}
+                          >
+                            &lt; Previous
+                          </button>
+                          <button
+                            className="pagination-btn"
+                            onClick={() => setAIUsagePage(prev => prev + 1)}
+                            disabled={(aiUsagePage + 1) * 10 >= tokenUsage.length}
+                          >
+                            Next &gt;
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="session-totals">
+                      <h3>SESSION TOTAL</h3>
+                      <div className="totals-grid">
+                        <div>Input: {sessionTotals.input.toLocaleString()} tokens</div>
+                        <div>Output: {sessionTotals.output.toLocaleString()} tokens</div>
+                      </div>
+                    </div>
+
+                    <div className="usage-actions">
+                      <button className="clear-usage-btn" onClick={() => {
+                        if (window.confirm('Clear all AI usage data?')) {
+                          clearTokenUsage()
+                          setShowAIPanel(false)
+                        }
+                      }}>
+                        Clear Usage Data
+                      </button>
+                      <button className="usage-close-btn" onClick={() => setShowAIPanel(false)}>
+                        Close
+                      </button>
+                    </div>
+                  </>
+                )
+              })()}
             </div>
           </div>
         </div>
