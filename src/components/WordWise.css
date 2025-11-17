@@ -157,8 +157,9 @@
 .api-key-display {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  padding: 0.5rem;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem;
   background-color: var(--bg);
   border-radius: 4px;
 }
@@ -253,13 +254,13 @@
 }
 
 .api-key-warning {
+  margin-top: 1rem;
   padding: 0.75rem 1rem;
   background-color: #fef3c7;
   border: 1px solid #fbbf24;
   border-radius: 6px;
   color: #92400e;
   font-size: 0.875rem;
-  margin-bottom: 1rem;
   line-height: 1.5;
 }
 
@@ -715,7 +716,7 @@
   display: flex;
   align-items: center;
   gap: 0.75rem;
-  margin-bottom: 0.75rem;
+  flex: 1;
 }
 
 .api-key-label {
@@ -729,13 +730,13 @@
   gap: 0.5rem;
 }
 
-.api-key-warning-settings {
+.cloud-info {
   margin-top: 1rem;
   padding: 0.75rem 1rem;
-  background-color: #fef3c7;
-  border: 1px solid #fbbf24;
+  background-color: #eff6ff;
+  border: 1px solid #93c5fd;
   border-radius: 6px;
-  color: #92400e;
+  color: #1e40af;
   font-size: 0.875rem;
   line-height: 1.5;
 }

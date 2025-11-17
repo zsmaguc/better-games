@@ -2115,8 +2115,8 @@ function WordWise() {
                         <h3>API Configuration</h3>
 
                         {!apiKey && (
-                          <div className="api-key-warning-settings">
-                            ⚠️ AI requires an Anthropic API key
+                          <div className="api-key-warning">
+                            ℹ️ AI requires an Anthropic API key
                           </div>
                         )}
 
@@ -2144,8 +2144,8 @@ function WordWise() {
                         </div>
 
                         {apiKey && (
-                          <div className="api-key-warning-settings">
-                            ⚠️ Your API key is stored locally in your browser. Only add your key on devices you trust.
+                          <div className="api-key-warning">
+                            ℹ️ Your API key is stored locally in your browser. Only add your key on devices you trust.
                           </div>
                         )}
                       </div>
@@ -2225,8 +2225,8 @@ function WordWise() {
                             </div>
                           </div>
                         </div>
-                        <div className="api-key-warning-settings">
-                          ⚠️ Use this code on other devices to sync your progress. Data is synced automatically after each game.
+                        <div className="cloud-info">
+                          ℹ️ Use this code on other devices to sync your progress. Data is synced automatically after each game.
                         </div>
                       </div>
 
@@ -2239,8 +2239,8 @@ function WordWise() {
                         >
                           {syncStatus === 'syncing' ? 'Syncing...' : 'Sync Now'}
                         </button>
-                        <div className="api-key-warning-settings" style={{ marginTop: '0.75rem' }}>
-                          ⚠️ Your API key is NOT synced for security. You'll need to add it on each device.
+                        <div className="cloud-info" style={{ marginTop: '0.75rem' }}>
+                          ℹ️ Your API key is NOT synced for security. You'll need to add it on each device.
                         </div>
                       </div>
                     </>
