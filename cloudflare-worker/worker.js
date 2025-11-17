@@ -6,10 +6,141 @@
  * passed through this proxy to avoid CORS restrictions.
  *
  * Also provides cloud sync endpoints for cross-device synchronization.
+ * Stores AI prompts in KV to keep them out of the React bundle.
  *
  * Deploy to: Cloudflare Workers
  * URL will be: https://wordwise-proxy.YOUR_USERNAME.workers.dev
  */
+
+// ==============================================================================
+// PROMPT MANAGEMENT
+// ==============================================================================
+
+/**
+ * Fallback prompts in case KV is unavailable
+ * These are minimal versions to keep the app functional
+ */
+const FALLBACK_PROMPTS = {
+  word_selection: {
+    template: "Select next 5-letter English word for user:\nStats: {{totalGames}} games, {{winRate}}% win, {{avgGuesses}} avg\nRecent30: {{recentCompact}}\nReturn only the word, nothing else.",
+    parameters: ["totalGames", "winRate", "avgGuesses", "recentCompact"]
+  },
+  word_reasoning: {
+    template: "You selected \"{{word}}\" for a user who recently played: {{recentGames}}. In ONE sentence, explain why this word is appropriate for their skill level.",
+    parameters: ["word", "recentGames"]
+  },
+  extended_word_info: {
+    template: "For \"{{word}}\": Provide etymology, word family, and translations in JSON format.",
+    parameters: ["word"]
+  }
+};
+
+/**
+ * Get prompt template from KV, with fallback
+ */
+async function getPromptTemplate(action, env) {
+  try {
+    const key = `prompt:${action}`;
+    const promptData = await env.WORDWISE_SYNC.get(key);
+
+    if (promptData) {
+      return JSON.parse(promptData);
+    }
+  } catch (error) {
+    console.error(`Failed to fetch prompt for ${action}:`, error);
+  }
+
+  // Fallback to hardcoded prompt
+  console.warn(`Using fallback prompt for ${action}`);
+  return FALLBACK_PROMPTS[action] || null;
+}
+
+/**
+ * Get static data from KV
+ */
+async function getStaticData(dataKey, env) {
+  try {
+    const key = `data:${dataKey}`;
+    return await env.WORDWISE_SYNC.get(key);
+  } catch (error) {
+    console.error(`Failed to fetch data ${dataKey}:`, error);
+    return null;
+  }
+}
+
+/**
+ * Substitute template variables with actual parameter values
+ * Supports:
+ * - Simple strings: {{word}} → "APPLE"
+ * - Arrays (join): {{previousHints}} → "fruit, red, crunchy"
+ * - Static data refs: {{tier2_section}} → fetched from KV
+ */
+async function substituteParams(template, params, env) {
+  let result = template;
+
+  // Find all {{variable}} patterns
+  const variablePattern = /\{\{(\w+)\}\}/g;
+  const matches = [...template.matchAll(variablePattern)];
+
+  for (const match of matches) {
+    const placeholder = match[0]; // e.g., "{{word}}"
+    const varName = match[1];     // e.g., "word"
+
+    let value;
+
+    // Check if it's in params
+    if (params.hasOwnProperty(varName)) {
+      value = params[varName];
+
+      // Handle arrays by joining
+      if (Array.isArray(value)) {
+        value = value.join(', ');
+      }
+    } else {
+      // Try fetching from KV as static data
+      value = await getStaticData(varName, env);
+
+      if (value === null) {
+        console.warn(`Missing parameter or data: ${varName}`);
+        value = ''; // Leave empty rather than showing placeholder
+      }
+    }
+
+    result = result.replace(placeholder, value);
+  }
+
+  return result;
+}
+
+/**
+ * Build complete prompt from action and parameters
+ */
+async function buildPrompt(action, params, env) {
+  // Get template from KV
+  const promptData = await getPromptTemplate(action, env);
+
+  if (!promptData) {
+    throw new Error(`No prompt template found for action: ${action}`);
+  }
+
+  // Substitute parameters
+  const prompt = await substituteParams(promptData.template, params, env);
+
+  return prompt;
+}
+
+/**
+ * Get model configuration from KV
+ */
+async function getModelConfig(env) {
+  try {
+    const config = await env.WORDWISE_SYNC.get('config:model');
+    return config ? JSON.parse(config) : null;
+  } catch (error) {
+    console.error('Failed to fetch model config:', error);
+    return null;
+  }
+}
 
 /**
  * Generate a random 8-character sync code in format: XXXX-YYYY
@@ -94,10 +225,36 @@ export default {
       // Parse request body
       const body = await request.json();
 
-      // Validate required fields
-      if (!body.model || !body.messages) {
+      let requestBody;
+      let maxTokens = 50; // default
+
+      // Check if this is a new action-based request or legacy direct prompt request
+      if (body.action && body.params) {
+        // NEW FORMAT: { action: "word_selection", params: { ... } }
+        // Build prompt from KV template
+        const prompt = await buildPrompt(body.action, body.params, env);
+
+        // Get model config for max tokens
+        const modelConfig = await getModelConfig(env);
+        if (modelConfig && modelConfig.maxTokens && modelConfig.maxTokens[body.action]) {
+          maxTokens = modelConfig.maxTokens[body.action];
+        }
+
+        requestBody = {
+          model: 'claude-haiku-4-5',
+          max_tokens: maxTokens,
+          messages: [{
+            role: 'user',
+            content: prompt
+          }]
+        };
+      } else if (body.model && body.messages) {
+        // LEGACY FORMAT: { model: "...", messages: [...], max_tokens: ... }
+        // Pass through as-is (for backward compatibility)
+        requestBody = body;
+      } else {
         return new Response(JSON.stringify({
-          error: { message: 'Invalid request body - missing model or messages' }
+          error: { message: 'Invalid request body - provide either {action, params} or {model, messages}' }
         }), {
           status: 400,
           headers: {
@@ -115,7 +272,7 @@ export default {
           'x-api-key': apiKey,
           'anthropic-version': '2023-06-01'
         },
-        body: JSON.stringify(body)
+        body: JSON.stringify(requestBody)
       });
 
       // Get response from Anthropic
