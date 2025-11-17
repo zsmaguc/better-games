@@ -82,6 +82,7 @@ async function substituteParams(template, params, env) {
   const variablePattern = /\{\{(\w+)\}\}/g;
   const matches = [...template.matchAll(variablePattern)];
 
+  // Process all substitutions
   for (const match of matches) {
     const placeholder = match[0]; // e.g., "{{word}}"
     const varName = match[1];     // e.g., "word"
@@ -96,19 +97,27 @@ async function substituteParams(template, params, env) {
       if (Array.isArray(value)) {
         value = value.join(', ');
       }
+
+      console.log(`Substituting ${varName} from params:`, value ? `${value.substring(0, 50)}...` : '(empty)');
     } else {
       // Try fetching from KV as static data
+      console.log(`Fetching ${varName} from KV...`);
       value = await getStaticData(varName, env);
 
       if (value === null) {
         console.warn(`Missing parameter or data: ${varName}`);
         value = ''; // Leave empty rather than showing placeholder
+      } else {
+        console.log(`Fetched ${varName} from KV:`, value ? `${value.substring(0, 50)}...` : '(empty)');
       }
     }
 
-    result = result.replace(placeholder, value);
+    // Replace all occurrences of this placeholder
+    const regex = new RegExp(placeholder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
+    result = result.replace(regex, value || '');
   }
 
+  console.log('Final prompt preview:', result.substring(0, 200) + '...');
   return result;
 }
 
