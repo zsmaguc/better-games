@@ -98,7 +98,7 @@ async function substituteParams(template, params, env) {
         value = value.join(', ');
       }
 
-      console.log(`Substituting ${varName} from params:`, value ? `${value.substring(0, 50)}...` : '(empty)');
+      console.log(`Substituting ${varName} from params:`, String(value).substring(0, 100));
     } else {
       // Try fetching from KV as static data
       console.log(`Fetching ${varName} from KV...`);
@@ -108,16 +108,16 @@ async function substituteParams(template, params, env) {
         console.warn(`Missing parameter or data: ${varName}`);
         value = ''; // Leave empty rather than showing placeholder
       } else {
-        console.log(`Fetched ${varName} from KV:`, value ? `${value.substring(0, 50)}...` : '(empty)');
+        console.log(`Fetched ${varName} from KV:`, String(value).substring(0, 100));
       }
     }
 
     // Replace all occurrences of this placeholder
     const regex = new RegExp(placeholder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
-    result = result.replace(regex, value || '');
+    result = result.replace(regex, String(value || ''));
   }
 
-  console.log('Final prompt preview:', result.substring(0, 200) + '...');
+  console.log('Final prompt preview:', result.substring(0, 300));
   return result;
 }
 
