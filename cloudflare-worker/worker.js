@@ -117,7 +117,9 @@ async function substituteParams(template, params, env) {
     result = result.replace(regex, String(value || ''));
   }
 
-  console.log('Final prompt preview:', result.substring(0, 300));
+  console.log('=== FULL PROMPT ===');
+  console.log(result);
+  console.log('=== END PROMPT ===');
   return result;
 }
 
