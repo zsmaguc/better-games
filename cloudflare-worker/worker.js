@@ -97,18 +97,13 @@ async function substituteParams(template, params, env) {
       if (Array.isArray(value)) {
         value = value.join(', ');
       }
-
-      console.log(`Substituting ${varName} from params:`, String(value).substring(0, 100));
     } else {
       // Try fetching from KV as static data
-      console.log(`Fetching ${varName} from KV...`);
       value = await getStaticData(varName, env);
 
       if (value === null) {
         console.warn(`Missing parameter or data: ${varName}`);
         value = ''; // Leave empty rather than showing placeholder
-      } else {
-        console.log(`Fetched ${varName} from KV:`, String(value).substring(0, 100));
       }
     }
 
@@ -117,9 +112,6 @@ async function substituteParams(template, params, env) {
     result = result.replace(regex, String(value || ''));
   }
 
-  console.log('=== FULL PROMPT ===');
-  console.log(result);
-  console.log('=== END PROMPT ===');
   return result;
 }
 
@@ -275,14 +267,6 @@ export default {
         });
       }
 
-      // Log request being sent to Claude
-      console.log('=== REQUEST TO CLAUDE ===');
-      console.log('Model:', requestBody.model);
-      console.log('Max tokens:', requestBody.max_tokens);
-      if (requestBody.messages && requestBody.messages[0]) {
-        console.log('Prompt length:', requestBody.messages[0].content.length, 'characters');
-      }
-
       // Forward request to Anthropic API
       const anthropicResponse = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
@@ -296,19 +280,6 @@ export default {
 
       // Get response from Anthropic
       const data = await anthropicResponse.json();
-
-      // Log Claude's response
-      console.log('=== RESPONSE FROM CLAUDE ===');
-      console.log('Status:', anthropicResponse.status);
-      if (data.content && data.content[0]) {
-        console.log('Response text:', data.content[0].text);
-      }
-      if (data.usage) {
-        console.log('Tokens - Input:', data.usage.input_tokens, 'Output:', data.usage.output_tokens);
-      }
-      if (data.error) {
-        console.error('Claude error:', data.error);
-      }
 
       // Return response with CORS headers
       return new Response(JSON.stringify(data), {
