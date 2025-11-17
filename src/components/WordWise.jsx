@@ -618,7 +618,7 @@ const clearGameState = () => {
 }
 
 // Claude API integration
-const callClaudeAPI = async (prompt, apiKey, returnUsage = false) => {
+const callClaudeAPI = async (prompt, apiKey, returnUsage = false, actionParams = null) => {
   try {
     // Use Cloudflare Worker if URL is configured, otherwise direct API call
     const apiUrl = CLOUDFLARE_WORKER_URL || 'https://api.anthropic.com/v1/messages'
@@ -638,17 +638,27 @@ const callClaudeAPI = async (prompt, apiKey, returnUsage = false) => {
       headers['anthropic-version'] = '2023-06-01'
     }
 
-    const response = await fetch(apiUrl, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
+    let requestBody;
+
+    // NEW FORMAT: action-based (prompts from KV via Worker)
+    if (actionParams && useWorker) {
+      requestBody = actionParams; // { action: "...", params: { ... } }
+    } else {
+      // LEGACY FORMAT: direct prompt (for backward compatibility / direct API)
+      requestBody = {
         model: 'claude-haiku-4-5',
         max_tokens: 50,
         messages: [{
           role: 'user',
           content: prompt
         }]
-      })
+      };
+    }
+
+    const response = await fetch(apiUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(requestBody)
     })
 
     if (!response.ok) {
@@ -694,7 +704,34 @@ const callClaudeAPI = async (prompt, apiKey, returnUsage = false) => {
 
 // Get extended word information (Etymology + Translations)
 const getExtendedWordInfo = async (word, apiKey) => {
-  const prompt = `For "${word}":
+  try {
+    const apiUrl = CLOUDFLARE_WORKER_URL || 'https://api.anthropic.com/v1/messages'
+    const useWorker = !!CLOUDFLARE_WORKER_URL
+
+    const headers = {
+      'Content-Type': 'application/json'
+    }
+
+    if (useWorker) {
+      headers['X-API-Key'] = apiKey
+    } else {
+      headers['x-api-key'] = apiKey
+      headers['anthropic-version'] = '2023-06-01'
+    }
+
+    let requestBody;
+
+    // NEW FORMAT: action-based (prompts from KV via Worker)
+    if (useWorker) {
+      requestBody = {
+        action: 'extended_word_info',
+        params: {
+          word
+        }
+      };
+    } else {
+      // LEGACY FORMAT: direct prompt (for backward compatibility / direct API)
+      const prompt = `For "${word}":
 
 1. Etymology (2 sentences max)
 2. Word family (4 related 5-letter words with brief definitions)
@@ -716,34 +753,21 @@ JSON format:
   }
 }
 
-Keep under 250 words. Return ONLY valid JSON.`
-
-  try {
-    const apiUrl = CLOUDFLARE_WORKER_URL || 'https://api.anthropic.com/v1/messages'
-    const useWorker = !!CLOUDFLARE_WORKER_URL
-
-    const headers = {
-      'Content-Type': 'application/json'
-    }
-
-    if (useWorker) {
-      headers['X-API-Key'] = apiKey
-    } else {
-      headers['x-api-key'] = apiKey
-      headers['anthropic-version'] = '2023-06-01'
-    }
-
-    const response = await fetch(apiUrl, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
+Keep under 250 words. Return ONLY valid JSON.`;
+      requestBody = {
         model: 'claude-haiku-4-5',
         max_tokens: 800,
         messages: [{
           role: 'user',
           content: prompt
         }]
-      })
+      };
+    }
+
+    const response = await fetch(apiUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(requestBody)
     })
 
     if (!response.ok) {
@@ -824,9 +848,7 @@ const getWordReasoning = async (word, gameHistory, apiKey) => {
     `${g.w}(${g.r > 0 ? 'won' : 'lost'})`
   ).join(',')
 
-  const prompt = `You selected "${word}" for a user who recently played: ${recentGames}. In ONE sentence, explain why this word is appropriate for their skill level.`
-
-  // Call with usage tracking
+  // Call with usage tracking (new action-based format)
   const apiUrl = CLOUDFLARE_WORKER_URL || 'https://api.anthropic.com/v1/messages'
   const useWorker = !!CLOUDFLARE_WORKER_URL
 
@@ -841,17 +863,34 @@ const getWordReasoning = async (word, gameHistory, apiKey) => {
     headers['anthropic-version'] = '2023-06-01'
   }
 
-  const response = await fetch(apiUrl, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({
+  let requestBody;
+
+  // NEW FORMAT: action-based (prompts from KV via Worker)
+  if (useWorker) {
+    requestBody = {
+      action: 'word_reasoning',
+      params: {
+        word,
+        recentGames
+      }
+    };
+  } else {
+    // LEGACY FORMAT: direct prompt (for backward compatibility / direct API)
+    const prompt = `You selected "${word}" for a user who recently played: ${recentGames}. In ONE sentence, explain why this word is appropriate for their skill level.`;
+    requestBody = {
       model: 'claude-haiku-4-5',
       max_tokens: 100,
       messages: [{
         role: 'user',
         content: prompt
       }]
-    })
+    };
+  }
+
+  const response = await fetch(apiUrl, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(requestBody)
   })
 
   const data = await response.json()
@@ -1386,11 +1425,41 @@ function WordWise() {
       }
 
       try {
-        // Generate optimized prompt
-        const prompt = generateOptimizedPrompt(gameHistory, usedWords, tier2Focus)
+        // Calculate stats for word selection
+        const totalGames = gameHistory.length
+        const wins = gameHistory.filter(g => g.r > 0).length
+        const winRate = totalGames > 0 ? Math.round((wins / totalGames) * 100) : 0
+        const wonGames = gameHistory.filter(g => g.r > 0)
+        const avgGuesses = wonGames.length > 0
+          ? Math.round((wonGames.reduce((sum, g) => sum + g.r, 0) / wonGames.length) * 10) / 10
+          : 0
 
-        // Call Claude API for word with usage tracking
-        const result = await callClaudeAPI(prompt, apiKey, true)
+        // Format recent 30 games compactly: WORD(result,understanding,source)
+        const recentCompact = gameHistory.slice(0, 30).map(g => {
+          let str = `${g.w}(${g.r}`
+          if (g.u) str += `,${g.u}`
+          str += `,${g.src === 'ai' ? 'a' : 'l'})`
+          return str
+        }).join(',')
+
+        // Call Claude API for word with usage tracking (new action-based format)
+        const params = {
+          totalGames,
+          winRate,
+          avgGuesses,
+          recentCompact
+        };
+
+        // Only include tier2_section when tier2 focus is enabled
+        // Worker will fetch the content from KV data:tier2_section
+        if (!tier2Focus) {
+          params.tier2_section = ''; // Empty when disabled
+        }
+
+        const result = await callClaudeAPI(null, apiKey, true, {
+          action: 'word_selection',
+          params
+        })
         const word = result.word
 
         // Store word selection token usage
